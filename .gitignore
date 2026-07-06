@@ -1,0 +1,6 @@
+# Geheime configuratie - nooit committen
+Boorinvulformulier/.env
+.env
+
+# Gegenereerde Excel-bestanden
+Boorinvulformulier/opdrachten/

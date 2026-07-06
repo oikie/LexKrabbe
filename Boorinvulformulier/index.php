@@ -1,57 +1,303 @@
 <?php
-// formulier.php - Boringsopdracht invoerformulier (alles in één bestand)
+// index.php - Boringsopdracht invoerformulier (alles in een bestand)
 $success = false;
 $errors  = [];
 
+function post_val(string $key, string $default = ''): string {
+    return trim($_POST[$key] ?? $default);
+}
+
+// Eenvoudige .env-lezer: KEY=VALUE per regel, # voor commentaar, quotes optioneel
+function laad_env(string $pad): array {
+    $env = [];
+    foreach (file($pad, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $regel) {
+        $regel = trim($regel);
+        if ($regel === '' || $regel[0] === '#' || !str_contains($regel, '=')) continue;
+        [$key, $val] = explode('=', $regel, 2);
+        $val = trim($val);
+        if (strlen($val) >= 2 && ($val[0] === '"' || $val[0] === "'") && $val[0] === substr($val, -1)) {
+            $val = substr($val, 1, -1);
+        }
+        $env[trim($key)] = $val;
+    }
+    return $env;
+}
+
+/* ===== XLSX generatie (zonder externe libraries, via ZipArchive) ===== */
+
+function xlsx_esc(string $s): string {
+    return htmlspecialchars($s, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+}
+
+function xlsx_col(int $i): string { // 0 => A, 1 => B, ...
+    $letters = '';
+    while ($i >= 0) {
+        $letters = chr(65 + ($i % 26)) . $letters;
+        $i = intdiv($i, 26) - 1;
+    }
+    return $letters;
+}
+
+// $rows: lijst van ['cells' => [...], 'bold' => bool]
+function xlsx_sheet_xml(array $rows, array $colWidths): string {
+    $cols = '';
+    foreach ($colWidths as $i => $w) {
+        $n = $i + 1;
+        $cols .= "<col min=\"$n\" max=\"$n\" width=\"$w\" customWidth=\"1\"/>";
+    }
+    $body = '';
+    foreach ($rows as $r => $row) {
+        $rn = $r + 1;
+        $body .= "<row r=\"$rn\">";
+        $style = !empty($row['bold']) ? ' s="1"' : '';
+        foreach ($row['cells'] as $c => $val) {
+            $ref = xlsx_col($c) . $rn;
+            if (is_int($val) || is_float($val)) {
+                $body .= "<c r=\"$ref\"$style><v>$val</v></c>";
+            } else {
+                $body .= "<c r=\"$ref\"$style t=\"inlineStr\"><is><t>" . xlsx_esc((string)$val) . "</t></is></c>";
+            }
+        }
+        $body .= '</row>';
+    }
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        . "<cols>$cols</cols><sheetData>$body</sheetData></worksheet>";
+}
+
+function make_xlsx(array $data, string $path): bool {
+    $jn = fn($v) => $v ? 'ja' : 'nee';
+
+    // --- Blad 1: alle velden ---
+    $velden = [
+        ['Datum boring',              $data['datum_boring'] ?: '-'],
+        ['Straatnaam + plaats',       $data['straatnaam']],
+        ['Huisnummer',                $data['huisnummer'] ?: '-'],
+        ['Opdrachtgever',             $data['opdrachtgever']],
+        ['Projectnummer',             $data['projectnummer']],
+        ['Boorplan aanwezig',         $jn($data['boorplan_aanwezig'])],
+        ['Boorplan bestand',          $data['boorplan_bestand'] ?: '-'],
+        ['Wordt de boring uitgezet',  $jn($data['boring_uitgezet'])],
+        ['Naam uitvoerder',           $data['naam_uitvoerder']],
+        ['Tel. uitvoerder',           $data['tel_uitvoerder'] ?: '-'],
+        ['Naam voorman',              $data['naam_voorman'] ?: '-'],
+        ['Tel. voorman',              $data['tel_voorman'] ?: '-'],
+        ['SDR-type',                  $data['sdr_type']],
+        ['Levering touw',             $jn($data['levering_touw'])],
+        ['Water in buis',             $jn($data['water_in_buis'])],
+        ['Bentonietafvoer',           $jn($data['bentonietafvoer'])],
+        ['In- en uittrede graven',    $jn($data['in_uittrede_graven'])],
+        ['KLIC APP melding aanwezig', $jn($data['klic_melding'])],
+        ['KLIC-nummer',               $data['klic_nummer'] ?: '-'],
+        ['KLIC datum uitgifte',       $data['klic_datum'] ?: '-'],
+        ['Toegewezen aan Lex',        $jn($data['toegewezen_lex'])],
+        ['Extra opmerking',           $data['extra_opmerking'] ?: '-'],
+    ];
+    $rows1 = [['cells' => ['Veld', 'Waarde'], 'bold' => true]];
+    foreach ($velden as $v) $rows1[] = ['cells' => $v];
+
+    // --- Blad 2: buizen/bundels ---
+    $rows2 = [[
+        'cells' => ['#','Type','Aantal meter','Diameter','Kleur','Mantel/mediumvoerend',
+                    'Levering Lex','Op rol/lengtes','Lasser','Rail eruit','Trekkop meelassen'],
+        'bold'  => true,
+    ]];
+    foreach ($data['items'] as $i => $item) {
+        if ($item['type'] === 'buis') {
+            $diameter = ($item['diameter_buis'] === 'anders' && $item['diameter_anders'] !== '')
+                ? $item['diameter_anders'] : $item['diameter_buis'];
+        } else {
+            $diameter = $item['diameter_bundel'];
+        }
+        $rows2[] = ['cells' => [
+            $i + 1,
+            $item['type'],
+            $item['meter'],
+            $diameter,
+            $item['kleur'],
+            $item['mantel_medium'],
+            $jn($item['levering']),
+            $item['levering'] ? $item['rol_lengtes'] : '-',
+            $item['levering'] && $item['rol_lengtes'] === 'op lengtes' ? $jn($item['lasser']) : '-',
+            $item['lasser'] ? $jn($item['rail_eruit']) : '-',
+            $item['rail_eruit'] ? $jn($item['trekkop']) : '-',
+        ]];
+    }
+
+    $zip = new ZipArchive();
+    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) return false;
+
+    $zip->addFromString('[Content_Types].xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      . '<Default Extension="xml" ContentType="application/xml"/>'
+      . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+      . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+      . '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+      . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+      . '</Types>');
+
+    $zip->addFromString('_rels/.rels',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+      . '</Relationships>');
+
+    $zip->addFromString('xl/workbook.xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+      . '<sheets>'
+      . '<sheet name="Opdracht" sheetId="1" r:id="rId1"/>'
+      . '<sheet name="Buizen en bundels" sheetId="2" r:id="rId2"/>'
+      . '</sheets></workbook>');
+
+    $zip->addFromString('xl/_rels/workbook.xml.rels',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+      . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
+      . '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+      . '</Relationships>');
+
+    $zip->addFromString('xl/styles.xml',
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      . '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+      . '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+      . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+      . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+      . '<cellXfs count="2">'
+      . '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+      . '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+      . '</cellXfs></styleSheet>');
+
+    $zip->addFromString('xl/worksheets/sheet1.xml', xlsx_sheet_xml($rows1, [28, 40]));
+    $zip->addFromString('xl/worksheets/sheet2.xml', xlsx_sheet_xml($rows2, [4, 10, 13, 18, 20, 22, 13, 15, 8, 10, 17]));
+
+    return $zip->close();
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (empty($_POST['opdrachtgever']))   $errors[] = 'Selecteer een opdrachtgever.';
-    if (empty($_POST['naam_uitvoerder'])) $errors[] = 'Naam uitvoerder is verplicht.';
-    if (empty($_POST['projectnummer']))   $errors[] = 'Projectnummer is verplicht.';
-    if (!empty($_POST['klic_melding']) && empty($_POST['klic_nummer']))
+    if (post_val('straatnaam') === '')      $errors[] = 'Straatnaam + plaats is verplicht.';
+    if (post_val('opdrachtgever') === '')   $errors[] = 'Opdrachtgever is verplicht.';
+    if (post_val('naam_uitvoerder') === '') $errors[] = 'Naam uitvoerder is verplicht.';
+    if (post_val('projectnummer') === '')   $errors[] = 'Projectnummer is verplicht.';
+    if (($_POST['klic_melding'] ?? 'nee') === 'ja' && post_val('klic_nummer') === '')
         $errors[] = 'Vul het KLIC-nummer in bij aanwezige KLIC-melding.';
 
     if (empty($errors)) {
         $data = [
-            'datum_boring'         => $_POST['datum_boring']          ?? null,
-            'straatnaam'           => trim($_POST['straatnaam']        ?? ''),
-            'huisnummer'           => trim($_POST['huisnummer']        ?? ''),
-            'opdrachtgever'        => $_POST['opdrachtgever'],
-            'opdrachtgever_anders' => trim($_POST['opdrachtgever_anders'] ?? ''),
-            'naam_uitvoerder'      => trim($_POST['naam_uitvoerder']),
-            'tel_uitvoerder'       => trim($_POST['tel_uitvoerder']    ?? ''),
-            'projectnummer'        => trim($_POST['projectnummer']     ?? ''),
-            'boorplan_aanwezig'    => isset($_POST['boorplan_aanwezig'])  ? 1 : 0,
-            'naam_voorman'         => trim($_POST['naam_voorman']      ?? ''),
-            'tel_voorman'          => trim($_POST['tel_voorman']       ?? ''),
-            'sdr_type'             => $_POST['sdr_type']               ?? 'SDR11',
-            'levering_touw'        => isset($_POST['levering_touw'])    ? 1 : 0,
-            'water_in_buis'        => isset($_POST['water_in_buis'])    ? 1 : 0,
-            'bentonietafvoer'      => isset($_POST['bentonietafvoer'])  ? 1 : 0,
-            'in_uittrede_graven'   => isset($_POST['in_uittrede_graven']) ? 1 : 0,
-            'klic_melding'         => isset($_POST['klic_melding'])     ? 1 : 0,
-            'klic_nummer'          => trim($_POST['klic_nummer']       ?? ''),
-            'klic_datum'           => $_POST['klic_datum']              ?? null,
-            'toegewezen_lex'       => isset($_POST['toegewezen_lex'])   ? 1 : 0,
-            'items'                => [],
+            'datum_boring'       => $_POST['datum_boring'] ?? null,
+            'straatnaam'         => post_val('straatnaam'),
+            'huisnummer'         => post_val('huisnummer'),
+            'opdrachtgever'      => post_val('opdrachtgever'),
+            'naam_uitvoerder'    => post_val('naam_uitvoerder'),
+            'tel_uitvoerder'     => post_val('tel_uitvoerder'),
+            'projectnummer'      => post_val('projectnummer'),
+            'boorplan_aanwezig'  => ($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja' ? 1 : 0,
+            'boorplan_bestand'   => null,
+            'boring_uitgezet'    => ($_POST['boring_uitgezet'] ?? 'nee') === 'ja' ? 1 : 0,
+            'naam_voorman'       => post_val('naam_voorman'),
+            'tel_voorman'        => post_val('tel_voorman'),
+            'sdr_type'           => $_POST['sdr_type'] ?? 'SDR11',
+            'levering_touw'      => ($_POST['levering_touw']      ?? 'nee') === 'ja' ? 1 : 0,
+            'water_in_buis'      => ($_POST['water_in_buis']      ?? 'nee') === 'ja' ? 1 : 0,
+            'bentonietafvoer'    => ($_POST['bentonietafvoer']    ?? 'nee') === 'ja' ? 1 : 0,
+            'in_uittrede_graven' => ($_POST['in_uittrede_graven'] ?? 'nee') === 'ja' ? 1 : 0,
+            'klic_melding'       => ($_POST['klic_melding']       ?? 'nee') === 'ja' ? 1 : 0,
+            'klic_nummer'        => post_val('klic_nummer'),
+            'klic_datum'         => $_POST['klic_datum'] ?? null,
+            'toegewezen_lex'     => ($_POST['toegewezen_lex']     ?? 'nee') === 'ja' ? 1 : 0,
+            'extra_opmerking'    => post_val('extra_opmerking'),
+            'items'              => [],
         ];
+
+        // Boorplan bestand (upload)
+        if ($data['boorplan_aanwezig'] && !empty($_FILES['boorplan_bestand']['name'])
+            && $_FILES['boorplan_bestand']['error'] === UPLOAD_ERR_OK) {
+            // TODO: verplaats met move_uploaded_file() naar gewenste map
+            $data['boorplan_bestand'] = basename($_FILES['boorplan_bestand']['name']);
+        }
 
         if (!empty($_POST['items']) && is_array($_POST['items'])) {
             foreach ($_POST['items'] as $item) {
                 $type  = $item['type'] ?? 'buis';
-                $entry = ['type' => $type, 'levering_lex' => isset($item['levering_lex']) ? 1 : 0];
+                $entry = [
+                    'type'            => $type,
+                    'meter'           => (float)($item['meter'] ?? 0),
+                    'kleur'           => $item['kleur'] ?? '',
+                    'mantel_medium'   => $item['mantel_medium'] ?? '',
+                    'levering'        => ($item['levering'] ?? 'nee') === 'ja' ? 1 : 0,
+                    'rol_lengtes'     => $item['rol_lengtes'] ?? '',
+                    'lasser'          => ($item['lasser']     ?? 'nee') === 'ja' ? 1 : 0,
+                    'rail_eruit'      => ($item['rail_eruit'] ?? 'nee') === 'ja' ? 1 : 0,
+                    'trekkop'         => ($item['trekkop']    ?? 'nee') === 'ja' ? 1 : 0,
+                ];
                 if ($type === 'buis') {
-                    $entry['meter']           = (float)($item['meter'] ?? 0);
-                    $entry['diameter_buis']   = $item['diameter_buis']  ?? '';
+                    $entry['diameter_buis']   = $item['diameter_buis'] ?? '';
                     $entry['diameter_anders'] = trim($item['diameter_anders'] ?? '');
-                    $entry['kleur']           = $item['kleur'] ?? '';
                 } else {
                     $entry['diameter_bundel'] = $item['diameter_bundel'] ?? '';
                 }
+                // Vervolgvelden alleen relevant bij levering = ja
+                if (!$entry['levering']) {
+                    $entry['rol_lengtes'] = '';
+                    $entry['lasser'] = $entry['rail_eruit'] = $entry['trekkop'] = 0;
+                }
+                if ($entry['rol_lengtes'] !== 'op lengtes') {
+                    $entry['lasser'] = $entry['rail_eruit'] = $entry['trekkop'] = 0;
+                }
+                if (!$entry['lasser'])     $entry['rail_eruit'] = $entry['trekkop'] = 0;
+                if (!$entry['rail_eruit']) $entry['trekkop'] = 0;
+
                 $data['items'][] = $entry;
             }
         }
 
         // TODO: bewaar $data in database of verwerk verder
+
+        // Excel-bestand genereren
+        $dir = __DIR__ . '/opdrachten';
+        if (!is_dir($dir)) mkdir($dir, 0777, true);
+        $proj     = preg_replace('/[^A-Za-z0-9_-]/', '_', $data['projectnummer']);
+        $fileName = 'opdracht_' . $proj . '_' . date('Ymd_His') . '.xlsx';
+        $xlsxPad  = $dir . '/' . $fileName;
+        if (make_xlsx($data, $xlsxPad)) {
+            $xlsx_link = 'opdrachten/' . rawurlencode($fileName);
+        }
+
+        // Excel per mail versturen
+        if (!empty($xlsx_link)) {
+            $envPad = __DIR__ . '/.env';
+            if (is_readable($envPad)) {
+                require_once __DIR__ . '/mailer.php';
+                $env = laad_env($envPad);
+                $cfg = [
+                    'smtp_host'      => $env['SMTP_HOST']           ?? 'smtp.gmail.com',
+                    'smtp_port'      => $env['SMTP_PORT']           ?? 465,
+                    'gebruiker'      => $env['SMTP_GEBRUIKER']      ?? '',
+                    'app_wachtwoord' => $env['SMTP_APP_WACHTWOORD'] ?? '',
+                    'afzender_naam'  => $env['SMTP_AFZENDER_NAAM']  ?? 'Boorformulier',
+                ];
+                $tekst = "Er is een nieuwe boringsopdracht ingevoerd.\n\n"
+                       . "Projectnummer: {$data['projectnummer']}\n"
+                       . "Opdrachtgever: {$data['opdrachtgever']}\n"
+                       . "Locatie: {$data['straatnaam']} {$data['huisnummer']}\n"
+                       . "Datum boring: " . ($data['datum_boring'] ?: 'onbekend') . "\n\n"
+                       . "Alle details staan in het bijgevoegde Excel-bestand.";
+                $mail_status = verstuur_opdracht_mail(
+                    $cfg,
+                    'oskar.krabbe300607@gmail.com',
+                    'Nieuwe boringsopdracht - ' . $data['projectnummer'],
+                    $tekst,
+                    $xlsxPad
+                );
+            } else {
+                $mail_status = ['ok' => false, 'fout' => '.env-bestand niet gevonden - mail niet verstuurd.'];
+            }
+        }
+
         $success = true;
     }
 }
@@ -59,11 +305,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 function old(string $key, string $default = ''): string {
     return htmlspecialchars($_POST[$key] ?? $default, ENT_QUOTES);
 }
-function checked_if(string $key): string {
-    return isset($_POST[$key]) ? 'checked' : '';
-}
-function selected_if(string $key, string $val): string {
-    return (($_POST[$key] ?? '') === $val) ? 'selected' : '';
+function radio_if(string $key, string $val, string $default = 'nee'): string {
+    return (($_POST[$key] ?? $default) === $val) ? 'checked' : '';
 }
 ?>
 <!DOCTYPE html>
@@ -156,7 +399,7 @@ function selected_if(string $key, string $val): string {
     .opt { font-weight: 400; color: var(--text-tertiary); font-size: 12px; }
     .req { color: #E24B4A; }
 
-    input[type=text], input[type=date], input[type=tel], input[type=number], select {
+    input[type=text], input[type=date], input[type=tel], input[type=number], select, textarea {
       font-family: var(--font);
       font-size: 14px; color: var(--text-primary);
       background: var(--bg-input);
@@ -167,16 +410,27 @@ function selected_if(string $key, string $val): string {
       transition: border-color 0.15s, box-shadow 0.15s;
       appearance: none; -webkit-appearance: none;
     }
+    textarea { height: auto; min-height: 90px; resize: vertical; }
     select {
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%235f5e5a' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14 2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
       background-repeat: no-repeat; background-position: right 10px center;
       padding-right: 34px; cursor: pointer;
     }
-    input:focus, select:focus {
+    input:focus, select:focus, textarea:focus {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(29,158,117,0.15);
     }
-    input::placeholder { color: var(--text-tertiary); }
+    input::placeholder, textarea::placeholder { color: var(--text-tertiary); }
+
+    input[type=file] {
+      font-family: var(--font); font-size: 13px; color: var(--text-secondary);
+    }
+    input[type=file]::file-selector-button {
+      font-family: var(--font); font-size: 13px; font-weight: 500;
+      background: var(--bg-muted); color: var(--text-primary);
+      border: 0.5px solid var(--border-md); border-radius: var(--radius-sm);
+      padding: 6px 12px; margin-right: 10px; cursor: pointer;
+    }
 
     /* "Anders" vrij-invoerveld onder een dropdown */
     .anders-input {
@@ -185,23 +439,22 @@ function selected_if(string $key, string $val): string {
     }
     .anders-input.visible { display: block; }
 
-    .toggle-wrap { display: flex; align-items: center; gap: 10px; }
-    .toggle-text { font-size: 14px; color: var(--text-primary); line-height: 1.4; }
-    .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; display: inline-block; }
-    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
-    .slider {
-      position: absolute; inset: 0;
-      background: var(--border-md); border-radius: 999px;
-      cursor: pointer; transition: background 0.2s;
+    /* Radiobuttons */
+    .radio-field { display: flex; flex-direction: column; gap: 6px; }
+    .radio-label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }
+    .radio-group { display: flex; gap: 18px; flex-wrap: wrap; }
+    .radio-opt {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 14px; font-weight: 400; color: var(--text-primary);
+      cursor: pointer; line-height: 1.4;
     }
-    .slider::before {
-      content: ''; position: absolute;
-      width: 18px; height: 18px; left: 3px; top: 3px;
-      background: white; border-radius: 50%;
-      transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    .radio-opt input[type=radio] {
+      width: 16px; height: 16px; margin: 0;
+      accent-color: var(--accent); cursor: pointer;
     }
-    .toggle input:checked + .slider { background: var(--accent); }
-    .toggle input:checked + .slider::before { transform: translateX(18px); }
+
+    .cond { display: none; }
+    .cond.visible { display: flex; }
 
     .btn-group {
       display: inline-flex;
@@ -270,6 +523,9 @@ function selected_if(string $key, string $val): string {
     .klic-extra { display: none; grid-template-columns: 1fr 1fr; gap: 14px; }
     .klic-extra.visible { display: grid; }
 
+    .boorplan-extra { display: none; }
+    .boorplan-extra.visible { display: flex; }
+
     .notice {
       font-size: 13px; color: var(--accent-hover);
       background: var(--accent-light);
@@ -310,6 +566,16 @@ function selected_if(string $key, string $val): string {
   <?php if ($success): ?>
     <div class="alert alert-success">
       <strong>Opdracht opgeslagen!</strong> De boringsopdracht is succesvol ingevoerd.
+      <?php if (!empty($xlsx_link)): ?>
+        <br><a href="<?= htmlspecialchars($xlsx_link) ?>" download style="color:var(--accent-hover);font-weight:600">
+          Download Excel-bestand
+        </a>
+      <?php endif; ?>
+      <?php if (isset($mail_status)): ?>
+        <br><?= $mail_status['ok']
+              ? 'Excel-bestand is per mail verstuurd.'
+              : 'Mail versturen mislukt: ' . htmlspecialchars($mail_status['fout']) ?>
+      <?php endif; ?>
     </div>
   <?php endif; ?>
 
@@ -324,9 +590,9 @@ function selected_if(string $key, string $val): string {
     </div>
   <?php endif; ?>
 
-  <form method="POST" action="formulier.php" novalidate>
+  <form method="POST" action="" enctype="multipart/form-data" novalidate>
 
-    <!-- ===== SECTIE 1: ALGEMEEN (alles optioneel) ===== -->
+    <!-- ===== SECTIE 1: ALGEMEEN ===== -->
     <section class="card">
       <div class="card-header">Algemeen</div>
       <div class="card-body">
@@ -339,9 +605,9 @@ function selected_if(string $key, string $val): string {
 
         <div class="field-row three">
           <div class="field col-2">
-            <label for="straatnaam">Straatnaam + plaats <span class="opt">(optioneel)</span></label>
+            <label for="straatnaam">Straatnaam + plaats <span class="req">*</span></label>
             <input type="text" id="straatnaam" name="straatnaam"
-                   placeholder="Dorpsstraat, Schiedam" value="<?= old('straatnaam') ?>">
+                   placeholder="Dorpsstraat, Schiedam" value="<?= old('straatnaam') ?>" required>
           </div>
           <div class="field">
             <label for="huisnummer">Huisnummer <span class="opt">(optioneel)</span></label>
@@ -361,17 +627,8 @@ function selected_if(string $key, string $val): string {
         <div class="field-row">
           <div class="field">
             <label for="opdrachtgever">Opdrachtgever <span class="req">*</span></label>
-            <select id="opdrachtgever" name="opdrachtgever" required
-                    onchange="toggleAnders(this,'opdrachtgever-anders')">
-              <option value="">— Selecteer —</option>
-              <?php foreach (['Hanab','Hak','Siers','Vitens','Anders'] as $og): ?>
-                <option value="<?= $og ?>" <?= selected_if('opdrachtgever', $og) ?>><?= $og ?></option>
-              <?php endforeach; ?>
-            </select>
-            <input type="text" id="opdrachtgever-anders" name="opdrachtgever_anders"
-                   placeholder="Naam opdrachtgever"
-                   value="<?= old('opdrachtgever_anders') ?>"
-                   class="anders-input <?= (old('opdrachtgever') === 'Anders') ? 'visible' : '' ?>">
+            <input type="text" id="opdrachtgever" name="opdrachtgever"
+                   placeholder="Naam opdrachtgever" value="<?= old('opdrachtgever') ?>" required>
           </div>
           <div class="field">
             <label for="projectnummer">Projectnummer <span class="req">*</span></label>
@@ -380,15 +637,35 @@ function selected_if(string $key, string $val): string {
           </div>
         </div>
 
-        <div class="field-row">
-          <div class="field">
-            <label>Boorplan aanwezig</label>
-            <div class="toggle-wrap" style="height:38px">
-              <label class="toggle">
-                <input type="checkbox" name="boorplan_aanwezig" value="1" <?= checked_if('boorplan_aanwezig') ?>>
-                <span class="slider"></span>
-              </label>
-            </div>
+        <div class="radio-field">
+          <span class="radio-label">Boorplan aanwezig</span>
+          <div class="radio-group">
+            <label class="radio-opt">
+              <input type="radio" name="boorplan_aanwezig" value="ja" id="boorplan-ja"
+                     <?= radio_if('boorplan_aanwezig','ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="boorplan_aanwezig" value="nee" id="boorplan-nee"
+                     <?= radio_if('boorplan_aanwezig','nee') ?>> Nee
+            </label>
+          </div>
+        </div>
+
+        <div id="boorplan-extra" class="field boorplan-extra <?= (($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja') ? 'visible' : '' ?>">
+          <label for="boorplan_bestand">Boorplan toevoegen</label>
+          <input type="file" id="boorplan_bestand" name="boorplan_bestand"
+                 accept=".pdf,.jpg,.jpeg,.png,.dwg,.dxf">
+        </div>
+
+        <div class="radio-field">
+          <span class="radio-label">Wordt de boring uitgezet?</span>
+          <div class="radio-group">
+            <label class="radio-opt">
+              <input type="radio" name="boring_uitgezet" value="ja" <?= radio_if('boring_uitgezet','ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="boring_uitgezet" value="nee" <?= radio_if('boring_uitgezet','nee') ?>> Nee
+            </label>
           </div>
         </div>
 
@@ -449,19 +726,23 @@ function selected_if(string $key, string $val): string {
       <div class="card-header">Werkzaamheden</div>
       <div class="card-body">
         <?php
-        $toggles = [
+        $werkzaamheden = [
             'levering_touw'      => 'Levering touw',
             'water_in_buis'      => 'Water in buis',
             'bentonietafvoer'    => 'Bentonietafvoer',
             'in_uittrede_graven' => 'In- en uittrede graven',
         ];
-        foreach ($toggles as $name => $label): ?>
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" name="<?= $name ?>" value="1" <?= checked_if($name) ?>>
-            <span class="slider"></span>
-          </label>
-          <span class="toggle-text"><?= $label ?></span>
+        foreach ($werkzaamheden as $name => $label): ?>
+        <div class="radio-field">
+          <span class="radio-label"><?= $label ?></span>
+          <div class="radio-group">
+            <label class="radio-opt">
+              <input type="radio" name="<?= $name ?>" value="ja" <?= radio_if($name,'ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="<?= $name ?>" value="nee" <?= radio_if($name,'nee') ?>> Nee
+            </label>
+          </div>
         </div>
         <?php endforeach; ?>
       </div>
@@ -477,16 +758,19 @@ function selected_if(string $key, string $val): string {
           Bij een ongeldige KLIC zullen wij zelf een melding maken en de kosten hiervoor in rekening brengen.
         </div>
 
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" name="klic_melding" value="1" id="klic-toggle"
-                   <?= checked_if('klic_melding') ?>>
-            <span class="slider"></span>
-          </label>
-          <span class="toggle-text">KLIC APP Melding aanwezig</span>
+        <div class="radio-field">
+          <span class="radio-label">KLIC APP Melding aanwezig</span>
+          <div class="radio-group" id="klic-group">
+            <label class="radio-opt">
+              <input type="radio" name="klic_melding" value="ja" <?= radio_if('klic_melding','ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="klic_melding" value="nee" <?= radio_if('klic_melding','nee') ?>> Nee
+            </label>
+          </div>
         </div>
 
-        <div id="klic-extra" class="klic-extra <?= isset($_POST['klic_melding']) ? 'visible' : '' ?>">
+        <div id="klic-extra" class="klic-extra <?= (($_POST['klic_melding'] ?? 'nee') === 'ja') ? 'visible' : '' ?>">
           <div class="field">
             <label for="klic_nummer">KLIC-nummer</label>
             <input type="text" id="klic_nummer" name="klic_nummer"
@@ -498,14 +782,30 @@ function selected_if(string $key, string $val): string {
           </div>
         </div>
 
-        <div class="toggle-wrap">
-          <label class="toggle">
-            <input type="checkbox" name="toegewezen_lex" value="1" <?= checked_if('toegewezen_lex') ?>>
-            <span class="slider"></span>
-          </label>
-          <span class="toggle-text">Toegewezen aan Lex</span>
+        <div class="radio-field">
+          <span class="radio-label">Toegewezen aan Lex</span>
+          <div class="radio-group">
+            <label class="radio-opt">
+              <input type="radio" name="toegewezen_lex" value="ja" <?= radio_if('toegewezen_lex','ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="toegewezen_lex" value="nee" <?= radio_if('toegewezen_lex','nee') ?>> Nee
+            </label>
+          </div>
         </div>
 
+      </div>
+    </section>
+
+    <!-- ===== SECTIE 6: EXTRA OPMERKING ===== -->
+    <section class="card">
+      <div class="card-header">Extra opmerking</div>
+      <div class="card-body">
+        <div class="field">
+          <label for="extra_opmerking">Opmerking <span class="opt">(optioneel)</span></label>
+          <textarea id="extra_opmerking" name="extra_opmerking"
+                    placeholder="Eventuele extra opmerkingen of bijzonderheden"><?= old('extra_opmerking') ?></textarea>
+        </div>
       </div>
     </section>
 
@@ -521,21 +821,10 @@ function selected_if(string $key, string $val): string {
   'use strict';
 
   const BUIS_DIAMETERS = ['40mm','50mm','63mm','75mm','110mm','125mm','160mm','200mm','250mm','310mm','anders'];
-  const BUIS_KLEUREN   = ['zwart','zwart-blauw','zwart-rood'];
+  const KLEUREN        = ['zwart-blauwe streep','zwart-oranje streep','helemaal blauw','helemaal oranje'];
   const BUNDEL_OPTIES  = ['2x 63mm','2x 110mm','3x 110mm','4x 110mm','6x 110mm','3x 160mm'];
 
   let itemTeller = 0;
-
-  // ---- Generieke "anders" toggle (ook voor opdrachtgever) ----
-  window.toggleAnders = function (selectEl, targetId) {
-    const target = document.getElementById(targetId);
-    if (!target) return;
-    if (selectEl.value === 'Anders' || selectEl.value === 'anders') {
-      target.classList.add('visible');
-    } else {
-      target.classList.remove('visible');
-    }
-  };
 
   // ---- Helpers ----
   function el(tag, props) {
@@ -549,23 +838,9 @@ function selected_if(string $key, string $val): string {
     return e;
   }
 
-  function maakToggle(name, labelTekst) {
-    const wrap   = el('div', { className: 'toggle-wrap' });
-    const lbl    = el('label', { className: 'toggle' });
-    const cb     = el('input', { type: 'checkbox', name, value: '1' });
-    const slider = el('span', { className: 'slider' });
-    const tekst  = el('span', { className: 'toggle-text', textContent: labelTekst });
-    lbl.appendChild(cb); lbl.appendChild(slider);
-    wrap.appendChild(lbl); wrap.appendChild(tekst);
-    return { wrap, cb };
-  }
-
   function maakSelectEl(name, opties) {
     const sel = el('select', { name });
-    opties.forEach(opt => {
-      const o = el('option', { value: opt, textContent: opt });
-      sel.appendChild(o);
-    });
+    opties.forEach(opt => sel.appendChild(el('option', { value: opt, textContent: opt })));
     return sel;
   }
 
@@ -582,20 +857,38 @@ function selected_if(string $key, string $val): string {
     return row;
   }
 
-  // ---- Diameter veld met "anders" vrij-invoer ----
+  // Radiogroep: geeft { wrap, radios } terug, onChange krijgt de gekozen waarde
+  function maakRadioGroup(name, labelTekst, opties, defaultVal, onChange) {
+    const wrap  = el('div', { className: 'radio-field' });
+    wrap.appendChild(el('span', { className: 'radio-label', textContent: labelTekst }));
+    const group = el('div', { className: 'radio-group' });
+    const radios = [];
+    opties.forEach(opt => {
+      const lbl   = el('label', { className: 'radio-opt' });
+      const radio = el('input', { type: 'radio', name, value: opt });
+      if (opt === defaultVal) radio.checked = true;
+      if (onChange) radio.addEventListener('change', () => onChange(opt));
+      lbl.appendChild(radio);
+      lbl.appendChild(document.createTextNode(' ' + opt.charAt(0).toUpperCase() + opt.slice(1)));
+      group.appendChild(lbl);
+      radios.push(radio);
+    });
+    wrap.appendChild(group);
+    return { wrap, radios };
+  }
+
+  // ---- Diameter veld met "anders" vrij-invoer (buis) ----
   function maakDiameterVeld(prefix) {
     const wrap = el('div', { className: 'field' });
     wrap.appendChild(el('label', { textContent: 'Diameter' }));
 
     const sel = maakSelectEl(`${prefix}[diameter_buis]`, BUIS_DIAMETERS);
-
     const andersInput = el('input', {
       type: 'text',
       name: `${prefix}[diameter_anders]`,
       placeholder: 'Voer diameter in (bijv. 400mm)',
       className: 'anders-input',
     });
-
     sel.addEventListener('change', () => {
       andersInput.classList.toggle('visible', sel.value === 'anders');
     });
@@ -603,12 +896,6 @@ function selected_if(string $key, string $val): string {
     wrap.appendChild(sel);
     wrap.appendChild(andersInput);
     return wrap;
-  }
-
-  // ---- Levering Lex toggle (gedeeld per item, gesynchroniseerd) ----
-  function maakLeveringLexToggle(prefix) {
-    const { wrap, cb } = maakToggle(`${prefix}[levering_lex]`, 'Levering buis door Lex Krabbe BV');
-    return { wrap, cb };
   }
 
   // ---- Buis/bundel item toevoegen ----
@@ -627,9 +914,13 @@ function selected_if(string $key, string $val): string {
     delBtn.onclick = () => wrapper.remove();
     top.appendChild(itemLbl); top.appendChild(delBtn);
 
-    // Type toggle
+    // Type toggle (buis/bundel) - wisselt alleen het diameterveld
     const typeInput = el('input', { type: 'hidden', name: `${prefix}[type]`, value: 'buis' });
     const typeGroup = el('div', { className: 'type-group' });
+
+    const buisDiameterVeld   = maakDiameterVeld(prefix);
+    const bundelDiameterVeld = maakField('Diameter configuratie', maakSelectEl(`${prefix}[diameter_bundel]`, BUNDEL_OPTIES));
+    bundelDiameterVeld.style.display = 'none';
 
     ['buis', 'bundel'].forEach(type => {
       const btn = el('button', {
@@ -641,48 +932,85 @@ function selected_if(string $key, string $val): string {
         typeGroup.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         typeInput.value = type;
-        buisBox.style.display   = type === 'buis'   ? '' : 'none';
-        bundelBox.style.display = type === 'bundel' ? '' : 'none';
+        buisDiameterVeld.style.display   = type === 'buis'   ? '' : 'none';
+        bundelDiameterVeld.style.display = type === 'bundel' ? '' : 'none';
       };
       typeGroup.appendChild(btn);
     });
 
-    // ---- Buis sub-box ----
-    const buisBox = el('div', { className: 'sub-box' });
+    // ---- Gedeelde velden (buis en bundel) ----
+    const box = el('div', { className: 'sub-box' });
 
     const meterInput = el('input', {
       type: 'number', name: `${prefix}[meter]`,
       placeholder: 'bijv. 150', min: '0', step: '0.1',
     });
 
-    buisBox.appendChild(maakRow([maakField('Aantal meter', meterInput), maakDiameterVeld(prefix)]));
-    buisBox.appendChild(maakField('Kleur', maakSelectEl(`${prefix}[kleur]`, BUIS_KLEUREN)));
+    box.appendChild(maakRow([maakField('Aantal meter', meterInput), buisDiameterVeld]));
+    box.appendChild(bundelDiameterVeld);
+    box.appendChild(maakField('Kleur', maakSelectEl(`${prefix}[kleur]`, KLEUREN)));
 
-    // Levering Lex in buis-box
-    buisBox.appendChild(el('hr', { className: 'sub-divider' }));
-    const lexBuis = maakLeveringLexToggle(prefix);
-    buisBox.appendChild(lexBuis.wrap);
+    const mantelMedium = maakRadioGroup(
+      `${prefix}[mantel_medium]`, 'Mantelbuis of mediumvoerend',
+      ['mantelbuis', 'mediumvoerend'], 'mantelbuis', null
+    );
+    box.appendChild(mantelMedium.wrap);
 
-    // ---- Bundel sub-box ----
-    const bundelBox = el('div', { className: 'sub-box', style: { display: 'none' } });
-    bundelBox.appendChild(maakField('Diameter configuratie', maakSelectEl(`${prefix}[diameter_bundel]`, BUNDEL_OPTIES)));
+    box.appendChild(el('hr', { className: 'sub-divider' }));
 
-    // Levering Lex ook in bundel-box (zelfde name, gesynchroniseerd)
-    bundelBox.appendChild(el('hr', { className: 'sub-divider' }));
-    const lexBundel = maakLeveringLexToggle(prefix);
-    bundelBox.appendChild(lexBundel.wrap);
+    // ---- Leveringsketen ----
+    // levering ja -> op rol/op lengtes -> (op lengtes) lasser ja -> rail eruit ja -> trekkop
+    function condToon(veld, zichtbaar) {
+      veld.classList.toggle('visible', zichtbaar);
+      if (!zichtbaar) {
+        // reset onderliggende radios naar 'nee'/eerste optie niet nodig; server negeert verborgen keten
+      }
+    }
 
-    // Sync: beide checkboxes wijzen naar dezelfde waarde
-    [lexBuis.cb, lexBundel.cb].forEach((cb, i, arr) => {
-      cb.addEventListener('change', () => { arr[1 - i].checked = cb.checked; });
+    const trekkop = maakRadioGroup(`${prefix}[trekkop]`, 'Trekkop meelassen', ['ja', 'nee'], 'nee', null);
+    trekkop.wrap.classList.add('cond');
+
+    const railEruit = maakRadioGroup(`${prefix}[rail_eruit]`, 'Moet de rail eruit', ['ja', 'nee'], 'nee', val => {
+      condToon(trekkop.wrap, val === 'ja');
     });
+    railEruit.wrap.classList.add('cond');
+
+    const lasser = maakRadioGroup(`${prefix}[lasser]`, 'Lasser', ['ja', 'nee'], 'nee', val => {
+      condToon(railEruit.wrap, val === 'ja');
+      if (val !== 'ja') condToon(trekkop.wrap, false);
+    });
+    lasser.wrap.classList.add('cond');
+
+    const rolLengtes = maakRadioGroup(`${prefix}[rol_lengtes]`, 'Op rol of op lengtes', ['op rol', 'op lengtes'], 'op rol', val => {
+      const lengtes = val === 'op lengtes';
+      condToon(lasser.wrap, lengtes);
+      if (!lengtes) { condToon(railEruit.wrap, false); condToon(trekkop.wrap, false); }
+    });
+    rolLengtes.wrap.classList.add('cond');
+
+    const levering = maakRadioGroup(`${prefix}[levering]`, 'Levering buis door Lex Krabbe BV', ['ja', 'nee'], 'nee', val => {
+      const ja = val === 'ja';
+      condToon(rolLengtes.wrap, ja);
+      if (!ja) {
+        condToon(lasser.wrap, false);
+        condToon(railEruit.wrap, false);
+        condToon(trekkop.wrap, false);
+      } else if (rolLengtes.radios.find(r => r.checked)?.value === 'op lengtes') {
+        condToon(lasser.wrap, true);
+      }
+    });
+
+    box.appendChild(levering.wrap);
+    box.appendChild(rolLengtes.wrap);
+    box.appendChild(lasser.wrap);
+    box.appendChild(railEruit.wrap);
+    box.appendChild(trekkop.wrap);
 
     // Samenstellen
     wrapper.appendChild(top);
     wrapper.appendChild(typeGroup);
     wrapper.appendChild(typeInput);
-    wrapper.appendChild(buisBox);
-    wrapper.appendChild(bundelBox);
+    wrapper.appendChild(box);
 
     document.getElementById('pipe-list').appendChild(wrapper);
   };
@@ -694,16 +1022,23 @@ function selected_if(string $key, string $val): string {
     document.getElementById('sdr_type_val').value = val;
   };
 
-  // ---- KLIC toggle ----
-  const klicToggle = document.getElementById('klic-toggle');
-  const klicExtra  = document.getElementById('klic-extra');
-  if (klicToggle && klicExtra) {
-    klicToggle.addEventListener('change', () => {
-      klicExtra.classList.toggle('visible', klicToggle.checked);
+  // ---- Boorplan radio -> bestand veld ----
+  const boorplanExtra = document.getElementById('boorplan-extra');
+  document.querySelectorAll('input[name="boorplan_aanwezig"]').forEach(r => {
+    r.addEventListener('change', () => {
+      boorplanExtra.classList.toggle('visible', r.value === 'ja' && r.checked);
     });
-  }
+  });
 
-  // Start met één item
+  // ---- KLIC radio -> extra velden ----
+  const klicExtra = document.getElementById('klic-extra');
+  document.querySelectorAll('input[name="klic_melding"]').forEach(r => {
+    r.addEventListener('change', () => {
+      klicExtra.classList.toggle('visible', r.value === 'ja' && r.checked);
+    });
+  });
+
+  // Start met een item
   addPipe();
 })();
 </script>

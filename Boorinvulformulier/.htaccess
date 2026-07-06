@@ -1,0 +1,4 @@
+# Blokkeer toegang tot .env en andere dotfiles via de browser
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
