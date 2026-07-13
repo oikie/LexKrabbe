@@ -29,151 +29,145 @@ function xlsx_esc(string $s): string {
     return htmlspecialchars($s, ENT_XML1 | ENT_QUOTES, 'UTF-8');
 }
 
-function xlsx_col(int $i): string { // 0 => A, 1 => B, ...
-    $letters = '';
-    while ($i >= 0) {
-        $letters = chr(65 + ($i % 26)) . $letters;
-        $i = intdiv($i, 26) - 1;
-    }
-    return $letters;
-}
+/* ===== XLSX generatie op basis van template.xlsx ===== */
 
-// $rows: lijst van ['cells' => [...], 'bold' => bool]
-function xlsx_sheet_xml(array $rows, array $colWidths): string {
-    $cols = '';
-    foreach ($colWidths as $i => $w) {
-        $n = $i + 1;
-        $cols .= "<col min=\"$n\" max=\"$n\" width=\"$w\" customWidth=\"1\"/>";
-    }
-    $body = '';
-    foreach ($rows as $r => $row) {
-        $rn = $r + 1;
-        $body .= "<row r=\"$rn\">";
-        $style = !empty($row['bold']) ? ' s="1"' : '';
-        foreach ($row['cells'] as $c => $val) {
-            $ref = xlsx_col($c) . $rn;
-            if (is_int($val) || is_float($val)) {
-                $body .= "<c r=\"$ref\"$style><v>$val</v></c>";
-            } else {
-                $body .= "<c r=\"$ref\"$style t=\"inlineStr\"><is><t>" . xlsx_esc((string)$val) . "</t></is></c>";
-            }
-        }
-        $body .= '</row>';
-    }
-    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        . "<cols>$cols</cols><sheetData>$body</sheetData></worksheet>";
+// Vervangt de inhoud van een cel in sheet-XML door tekst (stijl/borders blijven behouden)
+function xlsx_set_cell(string $xml, string $ref, string $tekst): string {
+    $esc = xlsx_esc($tekst);
+    $patroon = '/<c r="' . $ref . '"([^>]*?)(?:\/>|>.*?<\/c>)/s';
+    return preg_replace_callback($patroon, function ($m) use ($ref, $esc) {
+        preg_match('/s="(\d+)"/', $m[1], $sm);
+        $s = isset($sm[1]) ? ' s="' . $sm[1] . '"' : '';
+        return '<c r="' . $ref . '"' . $s . ' t="inlineStr"><is><t xml:space="preserve">' . $esc . '</t></is></c>';
+    }, $xml, 1);
 }
 
 function make_xlsx(array $data, string $path): bool {
-    $jn = fn($v) => $v ? 'ja' : 'nee';
+    $sjabloon = __DIR__ . '/template.xlsx';
+    if (!is_file($sjabloon) || !copy($sjabloon, $path)) return false;
 
-    // --- Blad 1: alle velden ---
-    $velden = [
-        ['Datum boring',              $data['datum_boring'] ?: '-'],
-        ['Straatnaam + plaats',       $data['straatnaam']],
-        ['Huisnummer',                $data['huisnummer'] ?: '-'],
-        ['Opdrachtgever',             $data['opdrachtgever']],
-        ['Projectnummer',             $data['projectnummer']],
-        ['Boorplan aanwezig',         $jn($data['boorplan_aanwezig'])],
-        ['Boorplan bestand',          $data['boorplan_bestand'] ?: '-'],
-        ['Wordt de boring uitgezet',  $jn($data['boring_uitgezet'])],
-        ['Naam uitvoerder',           $data['naam_uitvoerder']],
-        ['Tel. uitvoerder',           $data['tel_uitvoerder'] ?: '-'],
-        ['Naam voorman',              $data['naam_voorman'] ?: '-'],
-        ['Tel. voorman',              $data['tel_voorman'] ?: '-'],
-        ['SDR-type',                  $data['sdr_type']],
-        ['Levering touw',             $jn($data['levering_touw'])],
-        ['Water in buis',             $jn($data['water_in_buis'])],
-        ['Bentonietafvoer',           $jn($data['bentonietafvoer'])],
-        ['In- en uittrede graven',    $jn($data['in_uittrede_graven'])],
-        ['KLIC APP melding aanwezig', $jn($data['klic_melding'])],
-        ['KLIC-nummer',               $data['klic_nummer'] ?: '-'],
-        ['KLIC datum uitgifte',       $data['klic_datum'] ?: '-'],
-        ['Toegewezen aan Lex',        $jn($data['toegewezen_lex'])],
-        ['Extra opmerking',           $data['extra_opmerking'] ?: '-'],
-    ];
-    $rows1 = [['cells' => ['Veld', 'Waarde'], 'bold' => true]];
-    foreach ($velden as $v) $rows1[] = ['cells' => $v];
+    $jn = fn($v) => $v ? 'JA' : 'NEE';
 
-    // --- Blad 2: buizen/bundels ---
-    $rows2 = [[
-        'cells' => ['#','Type','Aantal meter','Diameter','Kleur','Mantel/mediumvoerend',
-                    'Levering Lex','Op rol/lengtes','Lasser','Rail eruit','Trekkop meelassen'],
-        'bold'  => true,
-    ]];
-    foreach ($data['items'] as $i => $item) {
-        if ($item['type'] === 'buis') {
-            $diameter = ($item['diameter_buis'] === 'anders' && $item['diameter_anders'] !== '')
-                ? $item['diameter_anders'] : $item['diameter_buis'];
+    // Straat en plaats splitsen op de laatste komma ("Dorpsstraat, Schiedam")
+    $straat = $data['straatnaam'];
+    $plaats = '';
+    if (($pos = strrpos($straat, ',')) !== false) {
+        $plaats = trim(substr($straat, $pos + 1));
+        $straat = trim(substr($straat, 0, $pos));
+    }
+
+    // Buis/bundel-regels + samenvattingen
+    $diam = fn(array $it) => ($it['diameter_buis'] === 'anders' && $it['diameter_anders'] !== '')
+        ? $it['diameter_anders'] : $it['diameter_buis'];
+    $itemRegels = [];
+    $meters     = [];
+    $lassen     = 0;
+    $geleverd   = 0;
+    foreach ($data['items'] as $item) {
+        if ($item['meter'] > 0) $meters[] = rtrim(rtrim(number_format($item['meter'], 1, '.', ''), '0'), '.');
+        if ($item['type'] === 'bundel') {
+            $delen = [];
+            foreach ($item['buizen'] as $b) {
+                $delen[] = $b['aantal'] . 'x ' . $diam($b);
+                if ($b['lasser'])   $lassen   = 1;
+                if ($b['levering']) $geleverd = 1;
+            }
+            $itemRegels[] = 'Bundel: ' . implode(' + ', $delen);
         } else {
-            $diameter = $item['diameter_bundel'];
+            $itemRegels[] = '1x ' . $diam($item) . ' ' . $item['kleur'];
+            if ($item['lasser'])   $lassen   = 1;
+            if ($item['levering']) $geleverd = 1;
         }
-        $rows2[] = ['cells' => [
-            $i + 1,
-            $item['type'],
-            $item['meter'],
-            $diameter,
-            $item['kleur'],
-            $item['mantel_medium'],
-            $jn($item['levering']),
-            $item['levering'] ? $item['rol_lengtes'] : '-',
-            $item['levering'] && $item['rol_lengtes'] === 'op lengtes' ? $jn($item['lasser']) : '-',
-            $item['lasser'] ? $jn($item['rail_eruit']) : '-',
-            $item['rail_eruit'] ? $jn($item['trekkop']) : '-',
-        ]];
+    }
+    $meters = array_unique($meters);
+
+    // Bekende gegevens -> vaste cellen op de voorkant (linkerdeel)
+    $map = [
+        'A4'  => 'Datum: '                 . ($data['datum_boring'] ?: ''),
+        'A5'  => 'Projectnr: '             . $data['projectnummer'],
+        'A7'  => 'SDR-type: '              . $data['sdr_type'],
+        'A8'  => 'Opdrachtgever: '         . $data['opdrachtgever'],
+        'A9'  => 'Te: '                    . $plaats,
+        'A10' => 'Boring uitgezet: '       . $jn($data['boring_uitgezet']),
+        'A11' => 'Uitvoerder: '            . $data['naam_uitvoerder'],
+        'A12' => 'Tel. '                   . $data['tel_uitvoerder'],
+        'A13' => 'Boorplan aanwezig: '     . $jn($data['boorplan_aanwezig']),
+        'A14' => 'Voorman: '               . $data['naam_voorman'],
+        'A15' => 'Tel. '                   . $data['tel_voorman'],
+        'A16' => 'Toegewezen aan Lex: '    . $jn($data['toegewezen_lex']),
+        'A17' => 'Plaats boring: '         . $plaats,
+        'A20' => trim($straat . ' ' . $data['huisnummer']),
+        'A21' => 'KLIC melding aanwezig: ' . $jn($data['klic_melding']),
+        'A23' => 'In-/uittrede graven: '   . $jn($data['in_uittrede_graven']),
+        'A24' => 'Lengte boring: ' . ($meters ? implode(' / ', $meters) : '............') . ' meter',
+        'A28' => 'Lassen: '           . $jn($lassen),
+        'A29' => 'Water in de buis: ' . $jn($data['water_in_buis']),
+        'A30' => 'Geleverde buis: '   . $jn($geleverd),
+        'A31' => 'Geleverde touw: '   . $jn($data['levering_touw']),
+        'A34' => 'Bentonietafvoer: '  . $jn($data['bentonietafvoer']),
+    ];
+
+    // Buis/bundel-regels verdelen over de vrije regels onder "Aantal, type en diameter buis:"
+    $slots = ['A27', 'A33', 'A35'];
+    foreach ($slots as $i => $ref) {
+        if (!isset($itemRegels[$i])) break;
+        $map[$ref] = ($i === count($slots) - 1 && count($itemRegels) > count($slots))
+            ? implode('; ', array_slice($itemRegels, $i))
+            : $itemRegels[$i];
+    }
+
+    // Achterkant: KLIC-nummer + datum uitgifte (alleen invullen als bekend)
+    if ($data['klic_nummer'] !== '') {
+        $map['D45'] = $data['klic_nummer'] . ($data['klic_datum'] ? ' - ' . $data['klic_datum'] : '');
+    }
+    // Achterkant: extra opmerking
+    if ($data['extra_opmerking'] !== '') {
+        $map['A38'] = 'Opmerking: ' . $data['extra_opmerking'];
     }
 
     $zip = new ZipArchive();
-    if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) return false;
+    if ($zip->open($path) !== true) return false;
+    $xml = $zip->getFromName('xl/worksheets/sheet1.xml');
+    if ($xml === false) { $zip->close(); return false; }
 
-    $zip->addFromString('[Content_Types].xml',
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-      . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-      . '<Default Extension="xml" ContentType="application/xml"/>'
-      . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-      . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-      . '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-      . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
-      . '</Types>');
+    foreach ($map as $ref => $tekst) {
+        $xml = xlsx_set_cell($xml, $ref, $tekst);
+    }
 
-    $zip->addFromString('_rels/.rels',
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-      . '</Relationships>');
+    // Vaste paginascheiding: rij 1-37 = voorkant, rij 38-73 = achterkant
+    if (strpos($xml, '<rowBreaks') === false) {
+        $brk = '<rowBreaks count="1" manualBreakCount="1"><brk id="37" max="16383" man="1"/></rowBreaks>';
+        if (strpos($xml, '</headerFooter>') !== false) {
+            $xml = str_replace('</headerFooter>', '</headerFooter>' . $brk, $xml);
+        } else {
+            $xml = preg_replace('/(<pageSetup[^>]*\/>)/', '$1' . $brk, $xml, 1);
+        }
+    }
 
-    $zip->addFromString('xl/workbook.xml',
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-      . '<sheets>'
-      . '<sheet name="Opdracht" sheetId="1" r:id="rId1"/>'
-      . '<sheet name="Buizen en bundels" sheetId="2" r:id="rId2"/>'
-      . '</sheets></workbook>');
+    $zip->addFromString('xl/worksheets/sheet1.xml', $xml);
 
-    $zip->addFromString('xl/_rels/workbook.xml.rels',
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-      . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
-      . '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
-      . '</Relationships>');
+    // 'boorprofiel'-grafiekblad verwijderen zodat het bestand (ook in mail-preview)
+    // direct het ingevulde formulier toont
+    $wb = $zip->getFromName('xl/workbook.xml');
+    if ($wb !== false && preg_match('/<sheet name="boorprofiel"[^>]*r:id="(rId\d+)"[^>]*\/>/', $wb, $m)) {
+        $rid = $m[1];
+        $wb  = str_replace($m[0], '', $wb);
+        $wb  = preg_replace('/activeTab="\d+"/', 'activeTab="0"', $wb);
+        $zip->addFromString('xl/workbook.xml', $wb);
 
-    $zip->addFromString('xl/styles.xml',
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-      . '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
-      . '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
-      . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
-      . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-      . '<cellXfs count="2">'
-      . '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
-      . '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
-      . '</cellXfs></styleSheet>');
-
-    $zip->addFromString('xl/worksheets/sheet1.xml', xlsx_sheet_xml($rows1, [28, 40]));
-    $zip->addFromString('xl/worksheets/sheet2.xml', xlsx_sheet_xml($rows2, [4, 10, 13, 18, 20, 22, 13, 15, 8, 10, 17]));
+        $rels = $zip->getFromName('xl/_rels/workbook.xml.rels');
+        if ($rels !== false && preg_match('/<Relationship Id="' . $rid . '"[^>]*Target="([^"]+)"[^>]*\/>/', $rels, $rm)) {
+            $zip->addFromString('xl/_rels/workbook.xml.rels', str_replace($rm[0], '', $rels));
+            $doel = 'xl/' . ltrim($rm[1], '/'); // bv. xl/chartsheets/sheet1.xml
+            $ct = $zip->getFromName('[Content_Types].xml');
+            if ($ct !== false) {
+                $ct = preg_replace('/<Override PartName="\/' . preg_quote($doel, '/') . '"[^>]*\/>/', '', $ct);
+                $zip->addFromString('[Content_Types].xml', $ct);
+            }
+            $zip->deleteName($doel);
+            $zip->deleteName('xl/chartsheets/_rels/sheet1.xml.rels');
+        }
+    }
 
     return $zip->close();
 }
@@ -186,6 +180,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (($_POST['klic_melding'] ?? 'nee') === 'ja' && post_val('klic_nummer') === '')
         $errors[] = 'Vul het KLIC-nummer in bij aanwezige KLIC-melding.';
 
+    // KLIC datum uitgifte mag niet meer dan 1 maand voor de datum boring liggen
+    // (of 1 maand voor vandaag als er geen datum boring is)
+    $klic_datum_val = post_val('klic_datum');
+    if ($klic_datum_val !== '') {
+        $ref_datum = post_val('datum_boring') !== '' ? post_val('datum_boring') : date('Y-m-d');
+        $grens = date('Y-m-d', strtotime($ref_datum . ' -1 month'));
+        if ($klic_datum_val < $grens) {
+            $errors[] = 'De KLIC datum uitgifte mag niet meer dan 1 maand voor '
+                      . (post_val('datum_boring') !== '' ? 'de datum van de boring' : 'vandaag')
+                      . ' liggen (op zijn vroegst ' . $grens . ').';
+        }
+    }
+
     if (empty($errors)) {
         $data = [
             'datum_boring'       => $_POST['datum_boring'] ?? null,
@@ -196,7 +203,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tel_uitvoerder'     => post_val('tel_uitvoerder'),
             'projectnummer'      => post_val('projectnummer'),
             'boorplan_aanwezig'  => ($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja' ? 1 : 0,
-            'boorplan_bestand'   => null,
+            'boorplan_pad'       => null,
+            'boorplan_naam'      => null,
             'boring_uitgezet'    => ($_POST['boring_uitgezet'] ?? 'nee') === 'ja' ? 1 : 0,
             'naam_voorman'       => post_val('naam_voorman'),
             'tel_voorman'        => post_val('tel_voorman'),
@@ -213,19 +221,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'items'              => [],
         ];
 
-        // Boorplan bestand (upload)
-        if ($data['boorplan_aanwezig'] && !empty($_FILES['boorplan_bestand']['name'])
-            && $_FILES['boorplan_bestand']['error'] === UPLOAD_ERR_OK) {
-            // TODO: verplaats met move_uploaded_file() naar gewenste map
-            $data['boorplan_bestand'] = basename($_FILES['boorplan_bestand']['name']);
+        // Boorplan bestand (upload) - wordt alleen als mailbijlage meegestuurd
+        $boorplan_status = null;
+        if ($data['boorplan_aanwezig']) {
+            $fout = $_FILES['boorplan_bestand']['error'] ?? UPLOAD_ERR_NO_FILE;
+            if ($fout === UPLOAD_ERR_OK) {
+                $data['boorplan_pad']  = $_FILES['boorplan_bestand']['tmp_name'];
+                $data['boorplan_naam'] = basename($_FILES['boorplan_bestand']['name']);
+                $boorplan_status = 'Boorplan "' . $data['boorplan_naam'] . '" ontvangen.';
+            } elseif ($fout === UPLOAD_ERR_NO_FILE) {
+                $boorplan_status = 'Let op: boorplan aanwezig aangevinkt, maar geen bestand gekozen.';
+            } elseif (in_array($fout, [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) {
+                $boorplan_status = 'Let op: het boorplan is te groot om te uploaden en is NIET meegestuurd.';
+            } else {
+                $boorplan_status = 'Let op: uploaden van het boorplan is mislukt (code ' . $fout . ') en is NIET meegestuurd.';
+            }
         }
 
         if (!empty($_POST['items']) && is_array($_POST['items'])) {
-            foreach ($_POST['items'] as $item) {
-                $type  = $item['type'] ?? 'buis';
-                $entry = [
-                    'type'            => $type,
-                    'meter'           => (float)($item['meter'] ?? 0),
+            // Leest alle buisvelden (behalve meter) incl. leveringsketen-logica
+            $lees_buis = function (array $item): array {
+                $e = [
                     'kleur'           => $item['kleur'] ?? '',
                     'mantel_medium'   => $item['mantel_medium'] ?? '',
                     'levering'        => ($item['levering'] ?? 'nee') === 'ja' ? 1 : 0,
@@ -233,24 +249,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'lasser'          => ($item['lasser']     ?? 'nee') === 'ja' ? 1 : 0,
                     'rail_eruit'      => ($item['rail_eruit'] ?? 'nee') === 'ja' ? 1 : 0,
                     'trekkop'         => ($item['trekkop']    ?? 'nee') === 'ja' ? 1 : 0,
+                    'diameter_buis'   => $item['diameter_buis'] ?? '',
+                    'diameter_anders' => trim($item['diameter_anders'] ?? ''),
                 ];
-                if ($type === 'buis') {
-                    $entry['diameter_buis']   = $item['diameter_buis'] ?? '';
-                    $entry['diameter_anders'] = trim($item['diameter_anders'] ?? '');
-                } else {
-                    $entry['diameter_bundel'] = $item['diameter_bundel'] ?? '';
-                }
                 // Vervolgvelden alleen relevant bij levering = ja
-                if (!$entry['levering']) {
-                    $entry['rol_lengtes'] = '';
-                    $entry['lasser'] = $entry['rail_eruit'] = $entry['trekkop'] = 0;
+                if (!$e['levering']) {
+                    $e['rol_lengtes'] = '';
+                    $e['lasser'] = $e['rail_eruit'] = $e['trekkop'] = 0;
                 }
-                if ($entry['rol_lengtes'] !== 'op lengtes') {
-                    $entry['lasser'] = $entry['rail_eruit'] = $entry['trekkop'] = 0;
+                if ($e['rol_lengtes'] !== 'op lengtes') {
+                    $e['lasser'] = $e['rail_eruit'] = $e['trekkop'] = 0;
                 }
-                if (!$entry['lasser'])     $entry['rail_eruit'] = $entry['trekkop'] = 0;
-                if (!$entry['rail_eruit']) $entry['trekkop'] = 0;
+                if (!$e['lasser'])     $e['rail_eruit'] = $e['trekkop'] = 0;
+                if (!$e['rail_eruit']) $e['trekkop'] = 0;
+                return $e;
+            };
 
+            foreach ($_POST['items'] as $item) {
+                $type  = $item['type'] ?? 'buis';
+                $entry = $lees_buis($item);
+                $entry['type']  = $type;
+                $entry['meter'] = (float)($item['meter'] ?? 0);
+                if ($type === 'bundel') {
+                    $entry['buizen'] = [];
+                    foreach (($item['bundel_buizen'] ?? []) as $bb) {
+                        if (!is_array($bb)) continue;
+                        $buis = $lees_buis($bb);
+                        $buis['aantal'] = max(1, (int)($bb['aantal'] ?? 1));
+                        $entry['buizen'][] = $buis;
+                    }
+                }
                 $data['items'][] = $entry;
             }
         }
@@ -280,18 +308,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'app_wachtwoord' => $env['SMTP_APP_WACHTWOORD'] ?? '',
                     'afzender_naam'  => $env['SMTP_AFZENDER_NAAM']  ?? 'Boorformulier',
                 ];
+                $bijlagen = [['pad' => $xlsxPad, 'naam' => $fileName]];
+                if (!empty($data['boorplan_pad'])) {
+                    $bijlagen[] = ['pad' => $data['boorplan_pad'], 'naam' => $data['boorplan_naam']];
+                }
                 $tekst = "Er is een nieuwe boringsopdracht ingevoerd.\n\n"
                        . "Projectnummer: {$data['projectnummer']}\n"
                        . "Opdrachtgever: {$data['opdrachtgever']}\n"
                        . "Locatie: {$data['straatnaam']} {$data['huisnummer']}\n"
                        . "Datum boring: " . ($data['datum_boring'] ?: 'onbekend') . "\n\n"
-                       . "Alle details staan in het bijgevoegde Excel-bestand.";
+                       . "Alle details staan in het bijgevoegde Excel-bestand."
+                       . (!empty($data['boorplan_pad']) ? "\nHet boorplan is als bijlage toegevoegd." : '');
                 $mail_status = verstuur_opdracht_mail(
                     $cfg,
                     'oskar.krabbe300607@gmail.com',
-                    'Nieuwe boringsopdracht - ' . $data['projectnummer'],
+                    'Nieuwe boringsopdracht - ' . $data['projectnummer'] . ' (' . date('d-m-Y H:i:s') . ')',
                     $tekst,
-                    $xlsxPad
+                    $bijlagen
                 );
             } else {
                 $mail_status = ['ok' => false, 'fout' => '.env-bestand niet gevonden - mail niet verstuurd.'];
@@ -571,10 +604,15 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
           Download Excel-bestand
         </a>
       <?php endif; ?>
+      <?php if (isset($boorplan_status)): ?>
+        <br><?= htmlspecialchars($boorplan_status) ?>
+      <?php endif; ?>
       <?php if (isset($mail_status)): ?>
         <br><?= $mail_status['ok']
-              ? 'Excel-bestand is per mail verstuurd.'
-              : 'Mail versturen mislukt: ' . htmlspecialchars($mail_status['fout']) ?>
+              ? 'Mail verstuurd met ' . (int)($mail_status['aantal_bijlagen'] ?? 1) . ' bijlage(n).'
+              : 'Mail versturen MISLUKT: ' . htmlspecialchars($mail_status['fout']) ?>
+      <?php else: ?>
+        <br>Er is geen mail verstuurd.
       <?php endif; ?>
     </div>
   <?php endif; ?>
@@ -822,7 +860,6 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
 
   const BUIS_DIAMETERS = ['40mm','50mm','63mm','75mm','110mm','125mm','160mm','200mm','250mm','310mm','anders'];
   const KLEUREN        = ['zwart-blauwe streep','zwart-oranje streep','helemaal blauw','helemaal oranje'];
-  const BUNDEL_OPTIES  = ['2x 63mm','2x 110mm','3x 110mm','4x 110mm','6x 110mm','3x 160mm'];
 
   let itemTeller = 0;
 
@@ -898,74 +935,11 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     return wrap;
   }
 
-  // ---- Buis/bundel item toevoegen ----
-  window.addPipe = function () {
-    itemTeller++;
-    const id     = itemTeller;
-    const prefix = `items[${id}]`;
+  // ---- Leveringsketen: levering -> rol/lengtes -> lasser -> rail eruit -> trekkop ----
+  function maakLeveringsKeten(prefix) {
+    const cont = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } });
 
-    const wrapper = el('div', { className: 'pipe-item', id: 'pipe-' + id });
-
-    // Header
-    const top     = el('div', { className: 'pipe-item-top' });
-    const itemLbl = el('span', { className: 'pipe-item-label', textContent: `Buis/bundel #${id}` });
-    const delBtn  = el('button', { type: 'button', className: 'btn-remove', textContent: '×' });
-    delBtn.setAttribute('aria-label', 'Verwijder item');
-    delBtn.onclick = () => wrapper.remove();
-    top.appendChild(itemLbl); top.appendChild(delBtn);
-
-    // Type toggle (buis/bundel) - wisselt alleen het diameterveld
-    const typeInput = el('input', { type: 'hidden', name: `${prefix}[type]`, value: 'buis' });
-    const typeGroup = el('div', { className: 'type-group' });
-
-    const buisDiameterVeld   = maakDiameterVeld(prefix);
-    const bundelDiameterVeld = maakField('Diameter configuratie', maakSelectEl(`${prefix}[diameter_bundel]`, BUNDEL_OPTIES));
-    bundelDiameterVeld.style.display = 'none';
-
-    ['buis', 'bundel'].forEach(type => {
-      const btn = el('button', {
-        type: 'button',
-        className: 'type-btn' + (type === 'buis' ? ' active' : ''),
-        textContent: type.charAt(0).toUpperCase() + type.slice(1),
-      });
-      btn.onclick = () => {
-        typeGroup.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        typeInput.value = type;
-        buisDiameterVeld.style.display   = type === 'buis'   ? '' : 'none';
-        bundelDiameterVeld.style.display = type === 'bundel' ? '' : 'none';
-      };
-      typeGroup.appendChild(btn);
-    });
-
-    // ---- Gedeelde velden (buis en bundel) ----
-    const box = el('div', { className: 'sub-box' });
-
-    const meterInput = el('input', {
-      type: 'number', name: `${prefix}[meter]`,
-      placeholder: 'bijv. 150', min: '0', step: '0.1',
-    });
-
-    box.appendChild(maakRow([maakField('Aantal meter', meterInput), buisDiameterVeld]));
-    box.appendChild(bundelDiameterVeld);
-    box.appendChild(maakField('Kleur', maakSelectEl(`${prefix}[kleur]`, KLEUREN)));
-
-    const mantelMedium = maakRadioGroup(
-      `${prefix}[mantel_medium]`, 'Mantelbuis of mediumvoerend',
-      ['mantelbuis', 'mediumvoerend'], 'mantelbuis', null
-    );
-    box.appendChild(mantelMedium.wrap);
-
-    box.appendChild(el('hr', { className: 'sub-divider' }));
-
-    // ---- Leveringsketen ----
-    // levering ja -> op rol/op lengtes -> (op lengtes) lasser ja -> rail eruit ja -> trekkop
-    function condToon(veld, zichtbaar) {
-      veld.classList.toggle('visible', zichtbaar);
-      if (!zichtbaar) {
-        // reset onderliggende radios naar 'nee'/eerste optie niet nodig; server negeert verborgen keten
-      }
-    }
+    function condToon(veld, zichtbaar) { veld.classList.toggle('visible', zichtbaar); }
 
     const trekkop = maakRadioGroup(`${prefix}[trekkop]`, 'Trekkop meelassen', ['ja', 'nee'], 'nee', null);
     trekkop.wrap.classList.add('cond');
@@ -1000,11 +974,119 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
       }
     });
 
-    box.appendChild(levering.wrap);
-    box.appendChild(rolLengtes.wrap);
-    box.appendChild(lasser.wrap);
-    box.appendChild(railEruit.wrap);
-    box.appendChild(trekkop.wrap);
+    [levering, rolLengtes, lasser, railEruit, trekkop].forEach(g => cont.appendChild(g.wrap));
+    return cont;
+  }
+
+  // ---- Alle buisvelden (behalve aantal meter) ----
+  function maakBuisVelden(prefix) {
+    const cont = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } });
+    cont.appendChild(maakDiameterVeld(prefix));
+    cont.appendChild(maakField('Kleur', maakSelectEl(`${prefix}[kleur]`, KLEUREN)));
+    cont.appendChild(maakRadioGroup(
+      `${prefix}[mantel_medium]`, 'Mantelbuis of mediumvoerend',
+      ['mantelbuis', 'mediumvoerend'], 'mantelbuis', null
+    ).wrap);
+    cont.appendChild(el('hr', { className: 'sub-divider' }));
+    cont.appendChild(maakLeveringsKeten(prefix));
+    return cont;
+  }
+
+  // ---- Bundel: meerdere buizen, elk met alle buisvelden behalve aantal meter ----
+  function maakBundelVeld(prefix) {
+    const wrap = el('div', { className: 'field' });
+    wrap.appendChild(el('label', { textContent: 'Buizen in bundel' }));
+
+    const lijst = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } });
+    let buisTeller = 0;
+
+    function addBundelBuis() {
+      buisTeller++;
+      const bid     = buisTeller;
+      const bPrefix = `${prefix}[bundel_buizen][${bid}]`;
+
+      const sub = el('div', { className: 'sub-box' });
+
+      const top = el('div', { className: 'pipe-item-top', style: { marginBottom: '0' } });
+      top.appendChild(el('span', { className: 'pipe-item-label', textContent: `Buis ${bid}` }));
+      const verwijder = el('button', { type: 'button', className: 'btn-remove', textContent: '×' });
+      verwijder.setAttribute('aria-label', 'Verwijder buis uit bundel');
+      verwijder.onclick = () => sub.remove();
+      top.appendChild(verwijder);
+      sub.appendChild(top);
+
+      const aantal = el('input', { type: 'number', name: `${bPrefix}[aantal]`, min: '1', step: '1', value: '1' });
+      aantal.style.maxWidth = '120px';
+      sub.appendChild(maakField('Aantal', aantal));
+
+      sub.appendChild(maakBuisVelden(bPrefix));
+      lijst.appendChild(sub);
+    }
+
+    const addBtn = el('button', { type: 'button', className: 'add-row-btn', textContent: '+ Buis toevoegen aan bundel' });
+    addBtn.style.marginTop = '8px';
+    addBtn.onclick = addBundelBuis;
+
+    addBundelBuis(); // start met 1 buis
+
+    wrap.appendChild(lijst);
+    wrap.appendChild(addBtn);
+    return wrap;
+  }
+
+  // ---- Buis/bundel item toevoegen ----
+  window.addPipe = function () {
+    itemTeller++;
+    const id     = itemTeller;
+    const prefix = `items[${id}]`;
+
+    const wrapper = el('div', { className: 'pipe-item', id: 'pipe-' + id });
+
+    // Header
+    const top     = el('div', { className: 'pipe-item-top' });
+    const itemLbl = el('span', { className: 'pipe-item-label', textContent: `Buis/bundel #${id}` });
+    const delBtn  = el('button', { type: 'button', className: 'btn-remove', textContent: '×' });
+    delBtn.setAttribute('aria-label', 'Verwijder item');
+    delBtn.onclick = () => wrapper.remove();
+    top.appendChild(itemLbl); top.appendChild(delBtn);
+
+    // Type toggle (solo/bundel) - wisselt tussen solo-velden en bundel-buizen
+    const typeInput = el('input', { type: 'hidden', name: `${prefix}[type]`, value: 'buis' });
+    const typeGroup = el('div', { className: 'type-group' });
+
+    const soloVelden = maakBuisVelden(prefix);
+    const bundelVeld = maakBundelVeld(prefix);
+    bundelVeld.style.display = 'none';
+
+    const TYPE_LABELS = { buis: 'Solo', bundel: 'Bundel' };
+    ['buis', 'bundel'].forEach(type => {
+      const btn = el('button', {
+        type: 'button',
+        className: 'type-btn' + (type === 'buis' ? ' active' : ''),
+        textContent: TYPE_LABELS[type],
+      });
+      btn.onclick = () => {
+        typeGroup.querySelectorAll('.type-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        typeInput.value = type;
+        soloVelden.style.display = type === 'buis'   ? '' : 'none';
+        bundelVeld.style.display = type === 'bundel' ? '' : 'none';
+      };
+      typeGroup.appendChild(btn);
+    });
+
+    // ---- Velden ----
+    const box = el('div', { className: 'sub-box' });
+
+    const meterInput = el('input', {
+      type: 'number', name: `${prefix}[meter]`,
+      placeholder: 'bijv. 150', min: '0', step: '0.1',
+    });
+    meterInput.style.maxWidth = '220px';
+
+    box.appendChild(maakField('Aantal meter', meterInput));
+    box.appendChild(soloVelden);
+    box.appendChild(bundelVeld);
 
     // Samenstellen
     wrapper.appendChild(top);
@@ -1037,6 +1119,23 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
       klicExtra.classList.toggle('visible', r.value === 'ja' && r.checked);
     });
   });
+
+  // ---- KLIC datum uitgifte: max 1 maand voor datum boring (of vandaag) ----
+  const datumBoring = document.getElementById('datum_boring');
+  const klicDatum   = document.getElementById('klic_datum');
+  function updateKlicMin() {
+    const ref = datumBoring.value ? new Date(datumBoring.value) : new Date();
+    ref.setMonth(ref.getMonth() - 1);
+    klicDatum.min = ref.toISOString().slice(0, 10);
+    if (klicDatum.value && klicDatum.value < klicDatum.min) {
+      klicDatum.setCustomValidity('Datum uitgifte mag niet meer dan 1 maand voor de datum van de boring liggen.');
+    } else {
+      klicDatum.setCustomValidity('');
+    }
+  }
+  datumBoring.addEventListener('change', updateKlicMin);
+  klicDatum.addEventListener('change', updateKlicMin);
+  updateKlicMin();
 
   // Start met een item
   addPipe();

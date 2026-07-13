@@ -24,11 +24,12 @@ function smtp_cmd($fp, string $cmd, string $verwacht): string {
 }
 
 /**
- * Verstuurt een mail met een xlsx-bijlage.
+ * Verstuurt een mail met een of meer bijlagen.
  * $cfg komt uit mail_config.php: smtp_host, smtp_port, gebruiker, app_wachtwoord, afzender_naam
+ * $bijlagen: pad-string (1 bijlage) of lijst van ['pad' => ..., 'naam' => ...]
  * Retourneert ['ok' => bool, 'fout' => string]
  */
-function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, string $tekst, string $bijlagePad): array {
+function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, string $tekst, $bijlagen): array {
     try {
         $host = $cfg['smtp_host']     ?? 'smtp.gmail.com';
         $port = (int)($cfg['smtp_port'] ?? 465);
@@ -39,8 +40,13 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
         if ($user === '' || $pass === '') {
             return ['ok' => false, 'fout' => 'Gebruiker of app-wachtwoord ontbreekt in mail_config.php'];
         }
-        if (!is_readable($bijlagePad)) {
-            return ['ok' => false, 'fout' => 'Bijlage niet gevonden: ' . basename($bijlagePad)];
+
+        // Normaliseer naar lijst van ['pad' => ..., 'naam' => ...]
+        if (is_string($bijlagen)) $bijlagen = [['pad' => $bijlagen, 'naam' => basename($bijlagen)]];
+        foreach ($bijlagen as $b) {
+            if (!is_readable($b['pad'])) {
+                return ['ok' => false, 'fout' => 'Bijlage niet gevonden: ' . ($b['naam'] ?? basename($b['pad']))];
+            }
         }
 
         $fp = stream_socket_client(
@@ -60,10 +66,8 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
         smtp_cmd($fp, "RCPT TO:<$naar>", '250');
         smtp_cmd($fp, 'DATA', '354');
 
-        // ---- MIME-bericht met bijlage ----
-        $grens        = 'grens_' . bin2hex(random_bytes(12));
-        $bestandsNaam = basename($bijlagePad);
-        $bijlageB64   = chunk_split(base64_encode(file_get_contents($bijlagePad)));
+        // ---- MIME-bericht met bijlagen ----
+        $grens = 'grens_' . bin2hex(random_bytes(12));
 
         $bericht  = "From: =?UTF-8?B?" . base64_encode($van) . "?= <$user>\r\n";
         $bericht .= "To: <$naar>\r\n";
@@ -75,11 +79,20 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
         $bericht .= "Content-Type: text/plain; charset=UTF-8\r\n";
         $bericht .= "Content-Transfer-Encoding: 8bit\r\n\r\n";
         $bericht .= $tekst . "\r\n";
-        $bericht .= "--$grens\r\n";
-        $bericht .= "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; name=\"$bestandsNaam\"\r\n";
-        $bericht .= "Content-Transfer-Encoding: base64\r\n";
-        $bericht .= "Content-Disposition: attachment; filename=\"$bestandsNaam\"\r\n\r\n";
-        $bericht .= $bijlageB64 . "\r\n";
+
+        foreach ($bijlagen as $b) {
+            $naam = $b['naam'] ?? basename($b['pad']);
+            $mime = function_exists('mime_content_type')
+                ? (mime_content_type($b['pad']) ?: 'application/octet-stream')
+                : 'application/octet-stream';
+            $b64  = chunk_split(base64_encode(file_get_contents($b['pad'])));
+
+            $bericht .= "--$grens\r\n";
+            $bericht .= "Content-Type: $mime; name=\"$naam\"\r\n";
+            $bericht .= "Content-Transfer-Encoding: base64\r\n";
+            $bericht .= "Content-Disposition: attachment; filename=\"$naam\"\r\n\r\n";
+            $bericht .= $b64 . "\r\n";
+        }
         $bericht .= "--$grens--\r\n";
 
         // Regels die met "." beginnen escapen (SMTP dot-stuffing)
@@ -90,7 +103,7 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
         smtp_cmd($fp, 'QUIT', '221');
         fclose($fp);
 
-        return ['ok' => true, 'fout' => ''];
+        return ['ok' => true, 'fout' => '', 'aantal_bijlagen' => count($bijlagen)];
     } catch (Throwable $e) {
         return ['ok' => false, 'fout' => $e->getMessage()];
     }
