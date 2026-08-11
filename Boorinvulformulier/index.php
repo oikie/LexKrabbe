@@ -43,10 +43,15 @@ function xlsx_set_cell(string $xml, string $ref, string $tekst): string {
 }
 
 function make_xlsx(array $data, string $path): bool {
-    $sjabloon = __DIR__ . '/template.xlsx';
+    $sjabloon = __DIR__ . '/template_v2.xlsx';
     if (!is_file($sjabloon) || !copy($sjabloon, $path)) return false;
 
     $jn = fn($v) => $v ? 'JA' : 'NEE';
+    $klicTekst = [
+        'ja'        => 'JA',
+        'nee'       => 'NEE',
+        'volgt_nog' => 'VOLGT NOG',
+    ][$data['klic_melding']] ?? 'NEE';
 
     // Straat en plaats splitsen op de laatste komma ("Dorpsstraat, Schiedam")
     $straat = $data['straatnaam'];
@@ -97,7 +102,7 @@ function make_xlsx(array $data, string $path): bool {
         'A16' => 'Toegewezen aan Lex: '    . $jn($data['toegewezen_lex']),
         'A17' => 'Plaats boring: '         . $plaats,
         'A20' => trim($straat . ' ' . $data['huisnummer']),
-        'A21' => 'KLIC melding aanwezig: ' . $jn($data['klic_melding']),
+        'A21' => 'KLIC-melding: ' . $klicTekst,
         'A23' => 'In-/uittrede graven: '   . $jn($data['in_uittrede_graven']),
         'A24' => 'Lengte boring: ' . ($meters ? implode(' / ', $meters) : '............') . ' meter',
         'A28' => 'Lassen: '           . $jn($lassen),
@@ -116,13 +121,14 @@ function make_xlsx(array $data, string $path): bool {
             : $itemRegels[$i];
     }
 
-    // Achterkant: KLIC-nummer + datum uitgifte (alleen invullen als bekend)
+    // Achterkant (LMRA-checklist): KLIC-nummer + datum uitgifte aanvullen indien bekend
     if ($data['klic_nummer'] !== '') {
-        $map['D45'] = $data['klic_nummer'] . ($data['klic_datum'] ? ' - ' . $data['klic_datum'] : '');
+        $map['A61'] = '☐  KLIC-melding aanwezig  (nr: ' . $data['klic_nummer']
+                    . ($data['klic_datum'] ? ' - uitgifte: ' . $data['klic_datum'] : '') . ')';
     }
-    // Achterkant: extra opmerking
+    // Achterkant: extra opmerking uit het intakeformulier vast alvast invullen
     if ($data['extra_opmerking'] !== '') {
-        $map['A38'] = 'Opmerking: ' . $data['extra_opmerking'];
+        $map['A44'] = $data['extra_opmerking'];
     }
 
     $zip = new ZipArchive();
@@ -153,6 +159,9 @@ function make_xlsx(array $data, string $path): bool {
         $rid = $m[1];
         $wb  = str_replace($m[0], '', $wb);
         $wb  = preg_replace('/activeTab="\d+"/', 'activeTab="0"', $wb);
+        // Print_Area verwijst met localSheetId naar de sheetvolgorde; na het verwijderen
+        // van het eerste tabblad (boorprofiel) schuift Blad1 van index 1 naar index 0.
+        $wb  = preg_replace('/(_xlnm\.Print_Area" localSheetId=")\d+(")/', '${1}0${2}', $wb);
         $zip->addFromString('xl/workbook.xml', $wb);
 
         $rels = $zip->getFromName('xl/_rels/workbook.xml.rels');
@@ -213,7 +222,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'water_in_buis'      => ($_POST['water_in_buis']      ?? 'nee') === 'ja' ? 1 : 0,
             'bentonietafvoer'    => ($_POST['bentonietafvoer']    ?? 'nee') === 'ja' ? 1 : 0,
             'in_uittrede_graven' => ($_POST['in_uittrede_graven'] ?? 'nee') === 'ja' ? 1 : 0,
-            'klic_melding'       => ($_POST['klic_melding']       ?? 'nee') === 'ja' ? 1 : 0,
+            'klic_melding'       => $_POST['klic_melding'] ?? 'nee',
             'klic_nummer'        => post_val('klic_nummer'),
             'klic_datum'         => $_POST['klic_datum'] ?? null,
             'toegewezen_lex'     => ($_POST['toegewezen_lex']     ?? 'nee') === 'ja' ? 1 : 0,
@@ -691,8 +700,13 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
 
         <div id="boorplan-extra" class="field boorplan-extra <?= (($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja') ? 'visible' : '' ?>">
           <label for="boorplan_bestand">Boorplan toevoegen</label>
-          <input type="file" id="boorplan_bestand" name="boorplan_bestand"
-                 accept=".pdf,.jpg,.jpeg,.png,.dwg,.dxf">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <input type="file" id="boorplan_bestand" name="boorplan_bestand"
+                   accept=".pdf,.jpg,.jpeg,.png,.dwg,.dxf" style="flex:1">
+            <button type="button" id="boorplan-verwijder" class="btn-remove"
+                    title="Verwijder gekozen bestand" style="display:none">&times;</button>
+          </div>
+          <span id="boorplan-bestandsnaam" class="opt" style="display:none"></span>
         </div>
 
         <div class="radio-field">
@@ -805,6 +819,9 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
             <label class="radio-opt">
               <input type="radio" name="klic_melding" value="nee" <?= radio_if('klic_melding','nee') ?>> Nee
             </label>
+            <label class="radio-opt">
+              <input type="radio" name="klic_melding" value="volgt_nog" <?= radio_if('klic_melding','volgt_nog') ?>> Volgt nog
+            </label>
           </div>
         </div>
 
@@ -859,7 +876,7 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
   'use strict';
 
   const BUIS_DIAMETERS = ['40mm','50mm','63mm','75mm','110mm','125mm','160mm','200mm','250mm','310mm','anders'];
-  const KLEUREN        = ['zwart-blauwe streep','zwart-oranje streep','helemaal blauw','helemaal oranje'];
+  const KLEUREN        = ['zwart-blauwe streep','zwart-oranje streep','zwart-rode streep','zwart-gele streep','helemaal blauw','helemaal oranje','helemaal zwart','helemaal rood'];
 
   let itemTeller = 0;
 
@@ -1008,7 +1025,7 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
       const sub = el('div', { className: 'sub-box' });
 
       const top = el('div', { className: 'pipe-item-top', style: { marginBottom: '0' } });
-      top.appendChild(el('span', { className: 'pipe-item-label', textContent: `Buis ${bid}` }));
+      top.appendChild(el('span', { className: 'pipe-item-label', textContent: 'Buis' }));
       const verwijder = el('button', { type: 'button', className: 'btn-remove', textContent: '×' });
       verwijder.setAttribute('aria-label', 'Verwijder buis uit bundel');
       verwijder.onclick = () => sub.remove();
@@ -1110,6 +1127,26 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     r.addEventListener('change', () => {
       boorplanExtra.classList.toggle('visible', r.value === 'ja' && r.checked);
     });
+  });
+
+  // ---- Boorplan bestand: naam tonen + kunnen aanpassen/verwijderen ----
+  const boorplanInput   = document.getElementById('boorplan_bestand');
+  const boorplanVerwBtn = document.getElementById('boorplan-verwijder');
+  const boorplanNaam    = document.getElementById('boorplan-bestandsnaam');
+  boorplanInput.addEventListener('change', () => {
+    if (boorplanInput.files.length) {
+      boorplanNaam.textContent = boorplanInput.files[0].name;
+      boorplanNaam.style.display = '';
+      boorplanVerwBtn.style.display = '';
+    } else {
+      boorplanNaam.style.display = 'none';
+      boorplanVerwBtn.style.display = 'none';
+    }
+  });
+  boorplanVerwBtn.addEventListener('click', () => {
+    boorplanInput.value = '';
+    boorplanNaam.style.display = 'none';
+    boorplanVerwBtn.style.display = 'none';
   });
 
   // ---- KLIC radio -> extra velden ----
