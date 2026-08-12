@@ -43,7 +43,7 @@ function xlsx_set_cell(string $xml, string $ref, string $tekst): string {
 }
 
 function make_xlsx(array $data, string $path): bool {
-    $sjabloon = __DIR__ . '/template_v2.xlsx';
+    $sjabloon = __DIR__ . '/template_v3.xlsx';
     if (!is_file($sjabloon) || !copy($sjabloon, $path)) return false;
 
     $jn = fn($v) => $v ? 'JA' : 'NEE';
