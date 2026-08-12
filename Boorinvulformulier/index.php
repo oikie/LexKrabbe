@@ -185,6 +185,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (post_val('straatnaam') === '')      $errors[] = 'Straatnaam + plaats is verplicht.';
     if (post_val('opdrachtgever') === '')   $errors[] = 'Opdrachtgever is verplicht.';
     if (post_val('naam_uitvoerder') === '') $errors[] = 'Naam uitvoerder is verplicht.';
+    if (post_val('tel_uitvoerder') === '')  $errors[] = 'Telefoonnummer uitvoerder is verplicht.';
+    if (post_val('naam_voorman') === '')    $errors[] = 'Naam voorman is verplicht.';
+    if (post_val('tel_voorman') === '')     $errors[] = 'Telefoonnummer voorman is verplicht.';
     if (post_val('projectnummer') === '')   $errors[] = 'Projectnummer is verplicht.';
     if (($_POST['klic_melding'] ?? 'nee') === 'ja' && post_val('klic_nummer') === '')
         $errors[] = 'Vul het KLIC-nummer in bij aanwezige KLIC-melding.';
@@ -269,8 +272,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($e['rol_lengtes'] !== 'op lengtes') {
                     $e['lasser'] = $e['rail_eruit'] = $e['trekkop'] = 0;
                 }
-                if (!$e['lasser'])     $e['rail_eruit'] = $e['trekkop'] = 0;
-                if (!$e['rail_eruit']) $e['trekkop'] = 0;
+                if (!$e['lasser']) $e['rail_eruit'] = $e['trekkop'] = 0;
                 return $e;
             };
 
@@ -321,7 +323,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($data['boorplan_pad'])) {
                     $bijlagen[] = ['pad' => $data['boorplan_pad'], 'naam' => $data['boorplan_naam']];
                 }
-                $tekst = "Er is een nieuwe boringsopdracht ingevoerd.\n\n"
+                $tekst = "Er is een nieuwe booropdracht ingevoerd.\n\n"
                        . "Projectnummer: {$data['projectnummer']}\n"
                        . "Opdrachtgever: {$data['opdrachtgever']}\n"
                        . "Locatie: {$data['straatnaam']} {$data['huisnummer']}\n"
@@ -331,7 +333,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mail_status = verstuur_opdracht_mail(
                     $cfg,
                     'oskar.krabbe300607@gmail.com',
-                    'Nieuwe boringsopdracht - ' . $data['projectnummer'] . ' (' . date('d-m-Y H:i:s') . ')',
+                    'Nieuwe booropdracht - ' . $data['projectnummer'] . ' (' . date('d-m-Y H:i:s') . ')',
                     $tekst,
                     $bijlagen
                 );
@@ -576,7 +578,7 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
       padding: 10px 14px; line-height: 1.5;
     }
 
-    .form-actions { display: flex; justify-content: flex-end; padding: 4px 0 2rem; }
+    .form-actions { display: flex; justify-content: space-between; padding: 4px 0 2rem; }
     .btn-primary {
       background: var(--accent); color: white; border: none;
       border-radius: var(--radius-md); padding: 11px 32px;
@@ -585,6 +587,16 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     }
     .btn-primary:hover  { background: var(--accent-hover); }
     .btn-primary:active { transform: scale(0.98); }
+
+    .btn-secondary {
+      background: var(--bg-card); color: var(--text-secondary);
+      border: 0.5px solid var(--border-md);
+      border-radius: var(--radius-md); padding: 11px 24px;
+      font-family: var(--font); font-size: 15px; font-weight: 600;
+      cursor: pointer; transition: background 0.15s, transform 0.1s, color 0.15s;
+    }
+    .btn-secondary:hover  { background: #FCEBEB; color: #A32D2D; border-color: #E24B4A; }
+    .btn-secondary:active { transform: scale(0.98); }
 
     @media (max-width: 580px) {
       .field-row       { grid-template-columns: 1fr; }
@@ -608,11 +620,6 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
   <?php if ($success): ?>
     <div class="alert alert-success">
       <strong>Opdracht opgeslagen!</strong> De boringsopdracht is succesvol ingevoerd.
-      <?php if (!empty($xlsx_link)): ?>
-        <br><a href="<?= htmlspecialchars($xlsx_link) ?>" download style="color:var(--accent-hover);font-weight:600">
-          Download Excel-bestand
-        </a>
-      <?php endif; ?>
       <?php if (isset($boorplan_status)): ?>
         <br><?= htmlspecialchars($boorplan_status) ?>
       <?php endif; ?>
@@ -728,22 +735,22 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
                    placeholder="Volledige naam" value="<?= old('naam_uitvoerder') ?>" required>
           </div>
           <div class="field">
-            <label for="tel_uitvoerder">Telefoonnummer uitvoerder</label>
+            <label for="tel_uitvoerder">Telefoonnummer uitvoerder <span class="req">*</span></label>
             <input type="tel" id="tel_uitvoerder" name="tel_uitvoerder"
-                   placeholder="+31 6 00 000 000" value="<?= old('tel_uitvoerder') ?>">
+                   placeholder="+31 6 00 000 000" value="<?= old('tel_uitvoerder') ?>" required>
           </div>
         </div>
 
         <div class="field-row">
           <div class="field">
-            <label for="naam_voorman">Naam voorman</label>
+            <label for="naam_voorman">Naam voorman <span class="req">*</span></label>
             <input type="text" id="naam_voorman" name="naam_voorman"
-                   placeholder="Volledige naam" value="<?= old('naam_voorman') ?>">
+                   placeholder="Volledige naam" value="<?= old('naam_voorman') ?>" required>
           </div>
           <div class="field">
-            <label for="tel_voorman">Telefoonnummer voorman</label>
+            <label for="tel_voorman">Telefoonnummer voorman <span class="req">*</span></label>
             <input type="tel" id="tel_voorman" name="tel_voorman"
-                   placeholder="+31 6 00 000 000" value="<?= old('tel_voorman') ?>">
+                   placeholder="+31 6 00 000 000" value="<?= old('tel_voorman') ?>" required>
           </div>
         </div>
 
@@ -865,6 +872,7 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     </section>
 
     <div class="form-actions">
+      <button type="button" id="clear-all-btn" class="btn-secondary">Alles wissen</button>
       <button type="submit" class="btn-primary">Opdracht opslaan</button>
     </div>
 
@@ -961,14 +969,13 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     const trekkop = maakRadioGroup(`${prefix}[trekkop]`, 'Trekkop meelassen', ['ja', 'nee'], 'nee', null);
     trekkop.wrap.classList.add('cond');
 
-    const railEruit = maakRadioGroup(`${prefix}[rail_eruit]`, 'Moet de rail eruit', ['ja', 'nee'], 'nee', val => {
-      condToon(trekkop.wrap, val === 'ja');
-    });
+    const railEruit = maakRadioGroup(`${prefix}[rail_eruit]`, 'Moet de rail eruit', ['ja', 'nee'], 'nee', null);
     railEruit.wrap.classList.add('cond');
 
-    const lasser = maakRadioGroup(`${prefix}[lasser]`, 'Lasser', ['ja', 'nee'], 'nee', val => {
-      condToon(railEruit.wrap, val === 'ja');
-      if (val !== 'ja') condToon(trekkop.wrap, false);
+    const lasser = maakRadioGroup(`${prefix}[lasser]`, 'Lasser door Lex Krabbe BV', ['ja', 'nee'], 'nee', val => {
+      const ja = val === 'ja';
+      condToon(railEruit.wrap, ja);
+      condToon(trekkop.wrap, ja);
     });
     lasser.wrap.classList.add('cond');
 
@@ -1173,6 +1180,34 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
   datumBoring.addEventListener('change', updateKlicMin);
   klicDatum.addEventListener('change', updateKlicMin);
   updateKlicMin();
+
+  // ---- Alles wissen ----
+  const formEl = document.querySelector('form');
+  document.getElementById('clear-all-btn').addEventListener('click', () => {
+    if (!confirm('Weet je zeker dat je alle velden wilt wissen?')) return;
+
+    formEl.reset();
+
+    // SDR-keuze terug naar standaard
+    document.querySelectorAll('#sdr-group .seg-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('#sdr-group .seg-btn').classList.add('active');
+    document.getElementById('sdr_type_val').value = 'SDR11';
+
+    // Boorplan-bestandsveld
+    boorplanExtra.classList.remove('visible');
+    boorplanNaam.style.display = 'none';
+    boorplanVerwBtn.style.display = 'none';
+
+    // KLIC-extra velden
+    klicExtra.classList.remove('visible');
+
+    // Buis/bundel-items opnieuw opbouwen met 1 leeg item
+    document.getElementById('pipe-list').innerHTML = '';
+    itemTeller = 0;
+    addPipe();
+
+    updateKlicMin();
+  });
 
   // Start met een item
   addPipe();
