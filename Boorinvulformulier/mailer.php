@@ -26,10 +26,11 @@ function smtp_cmd($fp, string $cmd, string $verwacht): string {
 /**
  * Verstuurt een mail met een of meer bijlagen.
  * $cfg komt uit mail_config.php: smtp_host, smtp_port, gebruiker, app_wachtwoord, afzender_naam
+ * $naar: e-mailadres (string) of lijst van e-mailadressen (array)
  * $bijlagen: pad-string (1 bijlage) of lijst van ['pad' => ..., 'naam' => ...]
  * Retourneert ['ok' => bool, 'fout' => string]
  */
-function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, string $tekst, $bijlagen): array {
+function verstuur_opdracht_mail(array $cfg, $naar, string $onderwerp, string $tekst, $bijlagen): array {
     try {
         $host = $cfg['smtp_host']     ?? 'smtp.gmail.com';
         $port = (int)($cfg['smtp_port'] ?? 465);
@@ -39,6 +40,13 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
 
         if ($user === '' || $pass === '') {
             return ['ok' => false, 'fout' => 'Gebruiker of app-wachtwoord ontbreekt in mail_config.php'];
+        }
+
+        // Normaliseer ontvanger(s) naar een lijst zonder lege/dubbele adressen
+        $ontvangers = is_array($naar) ? $naar : [$naar];
+        $ontvangers = array_values(array_unique(array_filter(array_map('trim', $ontvangers), fn($a) => $a !== '')));
+        if (empty($ontvangers)) {
+            return ['ok' => false, 'fout' => 'Geen ontvanger opgegeven om naar te versturen.'];
         }
 
         // Normaliseer naar lijst van ['pad' => ..., 'naam' => ...]
@@ -63,14 +71,17 @@ function verstuur_opdracht_mail(array $cfg, string $naar, string $onderwerp, str
         smtp_cmd($fp, base64_encode($user), '334');
         smtp_cmd($fp, base64_encode($pass), '235');
         smtp_cmd($fp, "MAIL FROM:<$user>", '250');
-        smtp_cmd($fp, "RCPT TO:<$naar>", '250');
+        foreach ($ontvangers as $ontvanger) {
+            smtp_cmd($fp, "RCPT TO:<$ontvanger>", '250');
+        }
         smtp_cmd($fp, 'DATA', '354');
 
         // ---- MIME-bericht met bijlagen ----
         $grens = 'grens_' . bin2hex(random_bytes(12));
 
+        $naarHeader = implode(', ', array_map(fn($a) => "<$a>", $ontvangers));
         $bericht  = "From: =?UTF-8?B?" . base64_encode($van) . "?= <$user>\r\n";
-        $bericht .= "To: <$naar>\r\n";
+        $bericht .= "To: $naarHeader\r\n";
         $bericht .= "Subject: =?UTF-8?B?" . base64_encode($onderwerp) . "?=\r\n";
         $bericht .= "MIME-Version: 1.0\r\n";
         $bericht .= "Content-Type: multipart/mixed; boundary=\"$grens\"\r\n";

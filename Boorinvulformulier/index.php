@@ -319,6 +319,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'app_wachtwoord' => $env['SMTP_APP_WACHTWOORD'] ?? '',
                     'afzender_naam'  => $env['SMTP_AFZENDER_NAAM']  ?? 'Boorformulier',
                 ];
+                // Ontvangers: kommagescheiden lijst uit .env, met een veilige standaardwaarde
+                $ontvangersRaw = $env['MAIL_ONTVANGERS'] ?? 'oskar.krabbe300607@gmail.com, Administratie@lexkrabbe.nl';
+                $ontvangers    = array_filter(array_map('trim', explode(',', $ontvangersRaw)));
                 $bijlagen = [['pad' => $xlsxPad, 'naam' => $fileName]];
                 if (!empty($data['boorplan_pad'])) {
                     $bijlagen[] = ['pad' => $data['boorplan_pad'], 'naam' => $data['boorplan_naam']];
@@ -332,7 +335,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                        . (!empty($data['boorplan_pad']) ? "\nHet boorplan is als bijlage toegevoegd." : '');
                 $mail_status = verstuur_opdracht_mail(
                     $cfg,
-                    'oskar.krabbe300607@gmail.com',
+                    $ontvangers,
                     'Nieuwe booropdracht - ' . $data['projectnummer'] . ' (' . date('d-m-Y H:i:s') . ')',
                     $tekst,
                     $bijlagen
