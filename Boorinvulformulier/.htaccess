@@ -2,3 +2,8 @@
 <FilesMatch "^\.">
     Require all denied
 </FilesMatch>
+
+# Blokkeer directe toegang tot de Excel-sjablonen (alleen server-side nodig, niet via browser)
+<FilesMatch "\.xlsx$">
+    Require all denied
+</FilesMatch>
