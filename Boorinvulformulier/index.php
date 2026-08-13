@@ -55,7 +55,7 @@ function make_xlsx(array $data, string $path): bool {
 
     // Kolom A op de voorkant is smal (geen overlap mogelijk met de meetgegevens ernaast),
     // dus tekst moet altijd binnen dit aantal tekens passen; anders netjes afkappen.
-    $kort = function (string $s, int $max = 29): string {
+    $kort = function (string $s, int $max = 27): string {
         $s = trim(preg_replace('/\s+/', ' ', $s));
         if (mb_strlen($s) <= $max) return $s;
         return mb_substr($s, 0, $max - 1) . '…';
@@ -83,10 +83,13 @@ function make_xlsx(array $data, string $path): bool {
         use ($kort, $KLEUR_KORT, $MANTEL_KORT): array {
         $kleur  = $KLEUR_KORT[$b['kleur']] ?? $b['kleur'];
         $mantel = $MANTEL_KORT[$b['mantel_medium']] ?? $b['mantel_medium'];
-        // "Lev:JA" wordt weggelaten als er toch al een Rol/lengtes-regel op volgt (anders dubbelop)
-        $levSuffix = $b['levering'] ? '' : ' Lev:NEE';
-        $regel0 = trim("{$meterPrefix}{$prefix}{$diamTekst} {$kleur} {$mantel}{$levSuffix}");
-        $regels = [['tekst' => $kort($regel0), 'prioriteit' => $basisPrioriteit]];
+        // Over 2 regels verdelen zodat niets afgekapt wordt (er is ruimte genoeg)
+        $regelA = trim("{$meterPrefix}{$prefix}{$diamTekst} {$kleur}");
+        $regelB = trim("{$prefix}{$mantel} Lev:" . ($b['levering'] ? 'JA' : 'NEE'));
+        $regels = [
+            ['tekst' => $kort($regelA), 'prioriteit' => $basisPrioriteit],
+            ['tekst' => $kort($regelB), 'prioriteit' => $basisPrioriteit],
+        ];
 
         if ($b['levering']) {
             $rol = $b['rol_lengtes'] === 'op lengtes' ? 'op lengtes' : 'op rol';
@@ -109,11 +112,12 @@ function make_xlsx(array $data, string $path): bool {
     foreach ($data['items'] as $item) {
         $meterPrefix = ($t = $meterTekst($item['meter'])) !== '' ? "{$t}m " : '';
         if ($item['type'] === 'bundel') {
-            $delen = [];
-            foreach ($item['buizen'] as $b) $delen[] = $b['aantal'] . 'x' . $diam($b);
-            $alleRegels[] = ['tekst' => $kort($meterPrefix . 'Bundel: ' . implode('+', $delen)), 'prioriteit' => 0];
+            // Kopregel blijft altijd kort (geen opsomming die kan afkappen); elke buis in de
+            // bundel krijgt daarna zijn eigen regel(s), inclusief aantal, zodat niets wegvalt.
+            $alleRegels[] = ['tekst' => $kort(trim($meterPrefix . 'Bundel:')), 'prioriteit' => 0];
             foreach ($item['buizen'] as $i => $b) {
-                $alleRegels = array_merge($alleRegels, $buisRegels($b, $diam($b), ' └' . ($i + 1) . ' ', '', 1));
+                $diamTekst = $b['aantal'] . 'x' . $diam($b);
+                $alleRegels = array_merge($alleRegels, $buisRegels($b, $diamTekst, ' └' . ($i + 1) . ' ', '', 0));
             }
         } else {
             $alleRegels = array_merge($alleRegels, $buisRegels($item, $diam($item), '', $meterPrefix, 0));
