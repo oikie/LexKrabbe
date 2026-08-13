@@ -43,7 +43,7 @@ function xlsx_set_cell(string $xml, string $ref, string $tekst): string {
 }
 
 function make_xlsx(array $data, string $path): bool {
-    $sjabloon = __DIR__ . '/template_v3.xlsx';
+    $sjabloon = __DIR__ . '/template_v4.xlsx';
     if (!is_file($sjabloon) || !copy($sjabloon, $path)) return false;
 
     $jn = fn($v) => $v ? 'JA' : 'NEE';
@@ -53,79 +53,121 @@ function make_xlsx(array $data, string $path): bool {
         'volgt_nog' => 'VOLGT NOG',
     ][$data['klic_melding']] ?? 'NEE';
 
-    // Straat en plaats splitsen op de laatste komma ("Dorpsstraat, Schiedam")
-    $straat = $data['straatnaam'];
-    $plaats = '';
-    if (($pos = strrpos($straat, ',')) !== false) {
-        $plaats = trim(substr($straat, $pos + 1));
-        $straat = trim(substr($straat, 0, $pos));
-    }
+    // Kolom A op de voorkant is smal (geen overlap mogelijk met de meetgegevens ernaast),
+    // dus tekst moet altijd binnen dit aantal tekens passen; anders netjes afkappen.
+    $kort = function (string $s, int $max = 29): string {
+        $s = trim(preg_replace('/\s+/', ' ', $s));
+        if (mb_strlen($s) <= $max) return $s;
+        return mb_substr($s, 0, $max - 1) . '…';
+    };
 
-    // Buis/bundel-regels + samenvattingen
+    $KLEUR_KORT = [
+        'zwart-blauwe streep' => 'zw/blauw',
+        'zwart-oranje streep' => 'zw/oranje',
+        'zwart-rode streep'   => 'zw/rood',
+        'zwart-gele streep'   => 'zw/geel',
+        'helemaal blauw'      => 'blauw',
+        'helemaal oranje'     => 'oranje',
+        'helemaal zwart'      => 'zwart',
+        'helemaal rood'       => 'rood',
+    ];
+    $MANTEL_KORT = ['mantelbuis' => 'mantel', 'mediumvoerend' => 'medium'];
+
     $diam = fn(array $it) => ($it['diameter_buis'] === 'anders' && $it['diameter_anders'] !== '')
         ? $it['diameter_anders'] : $it['diameter_buis'];
-    $itemRegels = [];
-    $meters     = [];
-    $lassen     = 0;
-    $geleverd   = 0;
+    $meterTekst = fn($m) => $m > 0 ? rtrim(rtrim(number_format($m, 1, '.', ''), '0'), '.') : '';
+
+    // Bouwt de detailregel(s) voor 1 buis. $basisPrioriteit bepaalt hoe snel deze regels
+    // sneuvelen als er te weinig ruimte is (0 = altijd tonen, hoger = eerder weglaten).
+    $buisRegels = function (array $b, string $diamTekst, string $prefix, string $meterPrefix, int $basisPrioriteit)
+        use ($kort, $KLEUR_KORT, $MANTEL_KORT): array {
+        $kleur  = $KLEUR_KORT[$b['kleur']] ?? $b['kleur'];
+        $mantel = $MANTEL_KORT[$b['mantel_medium']] ?? $b['mantel_medium'];
+        // "Lev:JA" wordt weggelaten als er toch al een Rol/lengtes-regel op volgt (anders dubbelop)
+        $levSuffix = $b['levering'] ? '' : ' Lev:NEE';
+        $regel0 = trim("{$meterPrefix}{$prefix}{$diamTekst} {$kleur} {$mantel}{$levSuffix}");
+        $regels = [['tekst' => $kort($regel0), 'prioriteit' => $basisPrioriteit]];
+
+        if ($b['levering']) {
+            $rol = $b['rol_lengtes'] === 'op lengtes' ? 'op lengtes' : 'op rol';
+            $regels[] = ['tekst' => $kort("{$prefix}Rol/lengtes: $rol"), 'prioriteit' => $basisPrioriteit + 1];
+            if ($b['rol_lengtes'] === 'op lengtes') {
+                $regels[] = ['tekst' => $kort("{$prefix}Lasser: " . ($b['lasser'] ? 'JA' : 'NEE')), 'prioriteit' => $basisPrioriteit + 2];
+                if ($b['lasser']) {
+                    $regels[] = [
+                        'tekst' => $kort("{$prefix}Rail eruit:" . ($b['rail_eruit'] ? 'JA' : 'NEE') . " Trekkop:" . ($b['trekkop'] ? 'JA' : 'NEE')),
+                        'prioriteit' => $basisPrioriteit + 3,
+                    ];
+                }
+            }
+        }
+        return $regels;
+    };
+
+    // Alle buis/bundel-regels verzamelen (meest belangrijk eerst binnen elk item)
+    $alleRegels = [];
     foreach ($data['items'] as $item) {
-        if ($item['meter'] > 0) $meters[] = rtrim(rtrim(number_format($item['meter'], 1, '.', ''), '0'), '.');
+        $meterPrefix = ($t = $meterTekst($item['meter'])) !== '' ? "{$t}m " : '';
         if ($item['type'] === 'bundel') {
             $delen = [];
-            foreach ($item['buizen'] as $b) {
-                $delen[] = $b['aantal'] . 'x ' . $diam($b);
-                if ($b['lasser'])   $lassen   = 1;
-                if ($b['levering']) $geleverd = 1;
+            foreach ($item['buizen'] as $b) $delen[] = $b['aantal'] . 'x' . $diam($b);
+            $alleRegels[] = ['tekst' => $kort($meterPrefix . 'Bundel: ' . implode('+', $delen)), 'prioriteit' => 0];
+            foreach ($item['buizen'] as $i => $b) {
+                $alleRegels = array_merge($alleRegels, $buisRegels($b, $diam($b), ' └' . ($i + 1) . ' ', '', 1));
             }
-            $itemRegels[] = 'Bundel: ' . implode(' + ', $delen);
         } else {
-            $itemRegels[] = '1x ' . $diam($item) . ' ' . $item['kleur'];
-            if ($item['lasser'])   $lassen   = 1;
-            if ($item['levering']) $geleverd = 1;
+            $alleRegels = array_merge($alleRegels, $buisRegels($item, $diam($item), '', $meterPrefix, 0));
         }
     }
-    $meters = array_unique($meters);
 
-    // Bekende gegevens -> vaste cellen op de voorkant (linkerdeel)
+    // Ruimte voor buis/bundel-regels op de voorkant is vast (rij 17 t/m 31 = 15 regels).
+    // Bij te veel detail laten we eerst de diepste/minst belangrijke regels vallen.
+    $budget = 15;
+    for ($p = 3; $p >= 1 && count($alleRegels) > $budget; $p--) {
+        $alleRegels = array_values(array_filter($alleRegels, fn($r) => $r['prioriteit'] !== $p));
+    }
+    $itemRegelsTekst = array_column($alleRegels, 'tekst');
+    if (count($itemRegelsTekst) > $budget) {
+        // Nog steeds te veel (heel veel losse buizen/bundels): regels samenvoegen per rij.
+        $perRij = (int) ceil(count($itemRegelsTekst) / $budget);
+        $itemRegelsTekst = array_map(fn($c) => $kort(implode('; ', $c)), array_chunk($itemRegelsTekst, $perRij));
+    }
+
+    // Alle velden van het formulier, in dezelfde volgorde als op de website
     $map = [
-        'A4'  => 'Datum: '                 . ($data['datum_boring'] ?: ''),
-        'A5'  => 'Projectnr: '             . $data['projectnummer'],
-        'A7'  => 'SDR-type: '              . $data['sdr_type'],
-        'A8'  => 'Opdrachtgever: '         . $data['opdrachtgever'],
-        'A9'  => 'Te: '                    . $plaats,
-        'A10' => 'Boring uitgezet: '       . $jn($data['boring_uitgezet']),
-        'A11' => 'Uitvoerder: '            . $data['naam_uitvoerder'],
-        'A12' => 'Tel. '                   . $data['tel_uitvoerder'],
-        'A13' => 'Boorplan aanwezig: '     . $jn($data['boorplan_aanwezig']),
-        'A14' => 'Voorman: '               . $data['naam_voorman'],
-        'A15' => 'Tel. '                   . $data['tel_voorman'],
-        'A16' => 'Toegewezen aan Lex: '    . $jn($data['toegewezen_lex']),
-        'A17' => 'Plaats boring: '         . $plaats,
-        'A20' => trim($straat . ' ' . $data['huisnummer']),
-        'A21' => 'KLIC-melding: ' . $klicTekst,
-        'A23' => 'In-/uittrede graven: '   . $jn($data['in_uittrede_graven']),
-        'A24' => 'Lengte boring: ' . ($meters ? implode(' / ', $meters) : '............') . ' meter',
-        'A28' => 'Lassen: '           . $jn($lassen),
-        'A29' => 'Water in de buis: ' . $jn($data['water_in_buis']),
-        'A30' => 'Geleverde buis: '   . $jn($geleverd),
-        'A31' => 'Geleverde touw: '   . $jn($data['levering_touw']),
-        'A34' => 'Bentonietafvoer: '  . $jn($data['bentonietafvoer']),
+        'A4'  => 'Datum boring: '        . ($data['datum_boring'] ?: '-'),
+        'A5'  => 'Locatie: '             . $data['straatnaam'],
+        'A6'  => 'Huisnummer: '          . ($data['huisnummer'] !== '' ? $data['huisnummer'] : '-'),
+        'A7'  => 'Opdrachtgever: '       . $data['opdrachtgever'],
+        'A8'  => 'Projectnummer: '       . $data['projectnummer'],
+        'A9'  => 'Boorplan aanwezig: '   . $jn($data['boorplan_aanwezig']),
+        'A10' => 'Boring uitgezet: '     . $jn($data['boring_uitgezet']),
+        'A11' => 'Naam uitvoerder: '     . $data['naam_uitvoerder'],
+        'A12' => 'Tel. uitvoerder: '     . $data['tel_uitvoerder'],
+        'A13' => 'Naam voorman: '        . $data['naam_voorman'],
+        'A14' => 'Tel. voorman: '        . $data['tel_voorman'],
+        'A15' => 'SDR-type: '            . $data['sdr_type'],
+        'A16' => 'Buizen / bundels:',
+        'A32' => 'Levering touw: '       . $jn($data['levering_touw']),
+        'A33' => 'Water in de buis: '    . $jn($data['water_in_buis']),
+        'A34' => 'Bentonietafvoer: '     . $jn($data['bentonietafvoer']),
+        'A35' => 'In-/uittrede graven: ' . $jn($data['in_uittrede_graven']),
+        'A36' => 'KLIC-melding: ' . $klicTekst . ($data['klic_nummer'] !== '' ? ' (' . $data['klic_nummer'] . ')' : ''),
+        'A37' => 'Toegewezen aan Lex: '  . $jn($data['toegewezen_lex']),
     ];
-
-    // Buis/bundel-regels verdelen over de vrije regels onder "Aantal, type en diameter buis:"
-    $slots = ['A27', 'A33', 'A35'];
-    foreach ($slots as $i => $ref) {
-        if (!isset($itemRegels[$i])) break;
-        $map[$ref] = ($i === count($slots) - 1 && count($itemRegels) > count($slots))
-            ? implode('; ', array_slice($itemRegels, $i))
-            : $itemRegels[$i];
+    // Labels/vrije tekst altijd binnen de kolombreedte houden
+    foreach ($map as $ref => $tekst) {
+        if ($ref !== 'A16') $map[$ref] = $kort($tekst);
     }
 
-    // Achterkant (LMRA-checklist): KLIC-nummer + datum uitgifte aanvullen indien bekend
-    if ($data['klic_nummer'] !== '') {
-        $map['A61'] = '☐  KLIC-melding aanwezig  (nr: ' . $data['klic_nummer']
-                    . ($data['klic_datum'] ? ' - uitgifte: ' . $data['klic_datum'] : '') . ')';
+    foreach ($itemRegelsTekst as $i => $regel) {
+        $map['A' . (17 + $i)] = $regel;
     }
+    // Onbenutte regels binnen het buis/bundel-blok expliciet leegmaken
+    for ($r = 17 + count($itemRegelsTekst); $r <= 31; $r++) {
+        $map['A' . $r] = '';
+    }
+
     // Achterkant: extra opmerking uit het intakeformulier vast alvast invullen
     if ($data['extra_opmerking'] !== '') {
         $map['A44'] = $data['extra_opmerking'];
@@ -618,14 +660,14 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
   <header class="page-header">
     <div class="logo-mark">LK</div>
     <div>
-      <h1>Nieuwe boringsopdracht</h1>
+      <h1>Nieuwe booropdracht</h1>
       <p class="subtitle">Lex Krabbe BV — Horizontaal gestuurd boren</p>
     </div>
   </header>
 
   <?php if ($success): ?>
     <div class="alert alert-success">
-      <strong>Opdracht opgeslagen!</strong> De boringsopdracht is succesvol ingevoerd.
+      <strong>Opdracht opgeslagen!</strong> De booropdracht is succesvol ingevoerd.
       <?php if (isset($boorplan_status)): ?>
         <br><?= htmlspecialchars($boorplan_status) ?>
       <?php endif; ?>
