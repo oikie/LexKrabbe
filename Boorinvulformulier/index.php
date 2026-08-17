@@ -43,7 +43,7 @@ function xlsx_set_cell(string $xml, string $ref, string $tekst): string {
 }
 
 function make_xlsx(array $data, string $path): bool {
-    $sjabloon = __DIR__ . '/template_v4.xlsx';
+    $sjabloon = __DIR__ . '/template_v5.xlsx';
     if (!is_file($sjabloon) || !copy($sjabloon, $path)) return false;
 
     $jn = fn($v) => $v ? 'JA' : 'NEE';
@@ -124,9 +124,9 @@ function make_xlsx(array $data, string $path): bool {
         }
     }
 
-    // Ruimte voor buis/bundel-regels op de voorkant is vast (rij 17 t/m 31 = 15 regels).
+    // Ruimte voor buis/bundel-regels op de voorkant is vast (rij 18 t/m 31 = 14 regels).
     // Bij te veel detail laten we eerst de diepste/minst belangrijke regels vallen.
-    $budget = 15;
+    $budget = 14;
     for ($p = 3; $p >= 1 && count($alleRegels) > $budget; $p--) {
         $alleRegels = array_values(array_filter($alleRegels, fn($r) => $r['prioriteit'] !== $p));
     }
@@ -145,13 +145,14 @@ function make_xlsx(array $data, string $path): bool {
         'A7'  => 'Opdrachtgever: '       . $data['opdrachtgever'],
         'A8'  => 'Projectnummer: '       . $data['projectnummer'],
         'A9'  => 'Boorplan aanwezig: '   . $jn($data['boorplan_aanwezig']),
-        'A10' => 'Boring uitgezet: '     . $jn($data['boring_uitgezet']),
-        'A11' => 'Naam uitvoerder: '     . $data['naam_uitvoerder'],
-        'A12' => 'Tel. uitvoerder: '     . $data['tel_uitvoerder'],
-        'A13' => 'Naam voorman: '        . $data['naam_voorman'],
-        'A14' => 'Tel. voorman: '        . $data['tel_voorman'],
-        'A15' => 'SDR-type: '            . $data['sdr_type'],
-        'A16' => 'Buizen / bundels:',
+        'A10' => 'Vergunning: '          . $jn($data['vergunning_aanwezig']),
+        'A11' => 'Boring uitgezet: '     . $jn($data['boring_uitgezet']),
+        'A12' => 'Naam uitvoerder: '     . $data['naam_uitvoerder'],
+        'A13' => 'Tel. uitvoerder: '     . $data['tel_uitvoerder'],
+        'A14' => 'Naam voorman: '        . $data['naam_voorman'],
+        'A15' => 'Tel. voorman: '        . $data['tel_voorman'],
+        'A16' => 'SDR-type: '            . $data['sdr_type'],
+        'A17' => 'Buizen / bundels:',
         'A32' => 'Levering touw: '       . $jn($data['levering_touw']),
         'A33' => 'Water in de buis: '    . $jn($data['water_in_buis']),
         'A34' => 'Bentonietafvoer: '     . $jn($data['bentonietafvoer']),
@@ -161,14 +162,14 @@ function make_xlsx(array $data, string $path): bool {
     ];
     // Labels/vrije tekst altijd binnen de kolombreedte houden
     foreach ($map as $ref => $tekst) {
-        if ($ref !== 'A16') $map[$ref] = $kort($tekst);
+        if ($ref !== 'A17') $map[$ref] = $kort($tekst);
     }
 
     foreach ($itemRegelsTekst as $i => $regel) {
-        $map['A' . (17 + $i)] = $regel;
+        $map['A' . (18 + $i)] = $regel;
     }
     // Onbenutte regels binnen het buis/bundel-blok expliciet leegmaken
-    for ($r = 17 + count($itemRegelsTekst); $r <= 31; $r++) {
+    for ($r = 18 + count($itemRegelsTekst); $r <= 31; $r++) {
         $map['A' . $r] = '';
     }
 
@@ -260,9 +261,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'naam_uitvoerder'    => post_val('naam_uitvoerder'),
             'tel_uitvoerder'     => post_val('tel_uitvoerder'),
             'projectnummer'      => post_val('projectnummer'),
-            'boorplan_aanwezig'  => ($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja' ? 1 : 0,
-            'boorplan_pad'       => null,
-            'boorplan_naam'      => null,
+            'boorplan_aanwezig'    => ($_POST['boorplan_aanwezig'] ?? 'nee') === 'ja' ? 1 : 0,
+            'boorplan_pad'         => null,
+            'boorplan_naam'        => null,
+            'vergunning_aanwezig'  => ($_POST['vergunning_aanwezig'] ?? 'nee') === 'ja' ? 1 : 0,
+            'vergunning_pad'       => null,
+            'vergunning_naam'      => null,
             'boring_uitgezet'    => ($_POST['boring_uitgezet'] ?? 'nee') === 'ja' ? 1 : 0,
             'naam_voorman'       => post_val('naam_voorman'),
             'tel_voorman'        => post_val('tel_voorman'),
@@ -293,6 +297,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $boorplan_status = 'Let op: het boorplan is te groot om te uploaden en is NIET meegestuurd.';
             } else {
                 $boorplan_status = 'Let op: uploaden van het boorplan is mislukt (code ' . $fout . ') en is NIET meegestuurd.';
+            }
+        }
+
+        // Vergunning bestand (upload) - wordt alleen als mailbijlage meegestuurd
+        $vergunning_status = null;
+        if ($data['vergunning_aanwezig']) {
+            $fout = $_FILES['vergunning_bestand']['error'] ?? UPLOAD_ERR_NO_FILE;
+            if ($fout === UPLOAD_ERR_OK) {
+                $data['vergunning_pad']  = $_FILES['vergunning_bestand']['tmp_name'];
+                $data['vergunning_naam'] = basename($_FILES['vergunning_bestand']['name']);
+                $vergunning_status = 'Vergunning "' . $data['vergunning_naam'] . '" ontvangen.';
+            } elseif ($fout === UPLOAD_ERR_NO_FILE) {
+                $vergunning_status = 'Let op: vergunning aanwezig aangevinkt, maar geen bestand gekozen.';
+            } elseif (in_array($fout, [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) {
+                $vergunning_status = 'Let op: de vergunning is te groot om te uploaden en is NIET meegestuurd.';
+            } else {
+                $vergunning_status = 'Let op: uploaden van de vergunning is mislukt (code ' . $fout . ') en is NIET meegestuurd.';
             }
         }
 
@@ -372,13 +393,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($data['boorplan_pad'])) {
                     $bijlagen[] = ['pad' => $data['boorplan_pad'], 'naam' => $data['boorplan_naam']];
                 }
+                if (!empty($data['vergunning_pad'])) {
+                    $bijlagen[] = ['pad' => $data['vergunning_pad'], 'naam' => $data['vergunning_naam']];
+                }
                 $tekst = "Er is een nieuwe booropdracht ingevoerd.\n\n"
                        . "Projectnummer: {$data['projectnummer']}\n"
                        . "Opdrachtgever: {$data['opdrachtgever']}\n"
                        . "Locatie: {$data['straatnaam']} {$data['huisnummer']}\n"
                        . "Datum boring: " . ($data['datum_boring'] ?: 'onbekend') . "\n\n"
                        . "Alle details staan in het bijgevoegde Excel-bestand."
-                       . (!empty($data['boorplan_pad']) ? "\nHet boorplan is als bijlage toegevoegd." : '');
+                       . (!empty($data['boorplan_pad']) ? "\nHet boorplan is als bijlage toegevoegd." : '')
+                       . (!empty($data['vergunning_pad']) ? "\nDe vergunning is als bijlage toegevoegd." : '');
                 $mail_status = verstuur_opdracht_mail(
                     $cfg,
                     $ontvangers,
@@ -675,6 +700,9 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
       <?php if (isset($boorplan_status)): ?>
         <br><?= htmlspecialchars($boorplan_status) ?>
       <?php endif; ?>
+      <?php if (isset($vergunning_status)): ?>
+        <br><?= htmlspecialchars($vergunning_status) ?>
+      <?php endif; ?>
       <?php if (isset($mail_status)): ?>
         <br><?= $mail_status['ok']
               ? 'Mail verstuurd met ' . (int)($mail_status['aantal_bijlagen'] ?? 1) . ' bijlage(n).'
@@ -766,6 +794,31 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
                     title="Verwijder gekozen bestand" style="display:none">&times;</button>
           </div>
           <span id="boorplan-bestandsnaam" class="opt" style="display:none"></span>
+        </div>
+
+        <div class="radio-field">
+          <span class="radio-label">Vergunning?</span>
+          <div class="radio-group">
+            <label class="radio-opt">
+              <input type="radio" name="vergunning_aanwezig" value="ja" id="vergunning-ja"
+                     <?= radio_if('vergunning_aanwezig','ja') ?>> Ja
+            </label>
+            <label class="radio-opt">
+              <input type="radio" name="vergunning_aanwezig" value="nee" id="vergunning-nee"
+                     <?= radio_if('vergunning_aanwezig','nee') ?>> Nee
+            </label>
+          </div>
+        </div>
+
+        <div id="vergunning-extra" class="field boorplan-extra <?= (($_POST['vergunning_aanwezig'] ?? 'nee') === 'ja') ? 'visible' : '' ?>">
+          <label for="vergunning_bestand">Vergunning toevoegen</label>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <input type="file" id="vergunning_bestand" name="vergunning_bestand"
+                   accept=".pdf,.jpg,.jpeg,.png,.dwg,.dxf" style="flex:1">
+            <button type="button" id="vergunning-verwijder" class="btn-remove"
+                    title="Verwijder gekozen bestand" style="display:none">&times;</button>
+          </div>
+          <span id="vergunning-bestandsnaam" class="opt" style="display:none"></span>
         </div>
 
         <div class="radio-field">
@@ -1180,33 +1233,44 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     document.getElementById('sdr_type_val').value = val;
   };
 
-  // ---- Boorplan radio -> bestand veld ----
-  const boorplanExtra = document.getElementById('boorplan-extra');
-  document.querySelectorAll('input[name="boorplan_aanwezig"]').forEach(r => {
-    r.addEventListener('change', () => {
-      boorplanExtra.classList.toggle('visible', r.value === 'ja' && r.checked);
+  // ---- Herbruikbare setup voor een "Ja/Nee" veld met bijbehorend bestandsveld ----
+  // (gebruikt voor zowel Boorplan als Vergunning)
+  function setupBestandsKeuze(radioName, extraId, inputId, verwijderId, naamId) {
+    const extra = document.getElementById(extraId);
+    document.querySelectorAll(`input[name="${radioName}"]`).forEach(r => {
+      r.addEventListener('change', () => {
+        extra.classList.toggle('visible', r.value === 'ja' && r.checked);
+      });
     });
-  });
 
-  // ---- Boorplan bestand: naam tonen + kunnen aanpassen/verwijderen ----
-  const boorplanInput   = document.getElementById('boorplan_bestand');
-  const boorplanVerwBtn = document.getElementById('boorplan-verwijder');
-  const boorplanNaam    = document.getElementById('boorplan-bestandsnaam');
-  boorplanInput.addEventListener('change', () => {
-    if (boorplanInput.files.length) {
-      boorplanNaam.textContent = boorplanInput.files[0].name;
-      boorplanNaam.style.display = '';
-      boorplanVerwBtn.style.display = '';
-    } else {
-      boorplanNaam.style.display = 'none';
-      boorplanVerwBtn.style.display = 'none';
-    }
-  });
-  boorplanVerwBtn.addEventListener('click', () => {
-    boorplanInput.value = '';
-    boorplanNaam.style.display = 'none';
-    boorplanVerwBtn.style.display = 'none';
-  });
+    const input   = document.getElementById(inputId);
+    const verwBtn = document.getElementById(verwijderId);
+    const naam    = document.getElementById(naamId);
+    input.addEventListener('change', () => {
+      if (input.files.length) {
+        naam.textContent = input.files[0].name;
+        naam.style.display = '';
+        verwBtn.style.display = '';
+      } else {
+        naam.style.display = 'none';
+        verwBtn.style.display = 'none';
+      }
+    });
+    verwBtn.addEventListener('click', () => {
+      input.value = '';
+      naam.style.display = 'none';
+      verwBtn.style.display = 'none';
+    });
+
+    return { extra, input, verwBtn, naam };
+  }
+
+  const boorplanVeld = setupBestandsKeuze(
+    'boorplan_aanwezig', 'boorplan-extra', 'boorplan_bestand', 'boorplan-verwijder', 'boorplan-bestandsnaam'
+  );
+  const vergunningVeld = setupBestandsKeuze(
+    'vergunning_aanwezig', 'vergunning-extra', 'vergunning_bestand', 'vergunning-verwijder', 'vergunning-bestandsnaam'
+  );
 
   // ---- KLIC radio -> extra velden ----
   const klicExtra = document.getElementById('klic-extra');
@@ -1245,10 +1309,12 @@ function radio_if(string $key, string $val, string $default = 'nee'): string {
     document.querySelector('#sdr-group .seg-btn').classList.add('active');
     document.getElementById('sdr_type_val').value = 'SDR11';
 
-    // Boorplan-bestandsveld
-    boorplanExtra.classList.remove('visible');
-    boorplanNaam.style.display = 'none';
-    boorplanVerwBtn.style.display = 'none';
+    // Boorplan- en vergunning-bestandsvelden
+    [boorplanVeld, vergunningVeld].forEach(v => {
+      v.extra.classList.remove('visible');
+      v.naam.style.display = 'none';
+      v.verwBtn.style.display = 'none';
+    });
 
     // KLIC-extra velden
     klicExtra.classList.remove('visible');
