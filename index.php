@@ -69,7 +69,9 @@ function e($s) { return htmlspecialchars($s, ENT_QUOTES, 'UTF-8'); }
 <meta property="og:title" content="<?= e($site['title']) ?>">
 <meta property="og:description" content="<?= e($site['desc']) ?>">
 <meta property="og:type" content="website">
-<link rel="icon" href="<?= $asset ?>images/0f5c5eb4bff54cb19fa3672c847743a4.png">
+<link rel="icon" href="Boorinvulformulier/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="Boorinvulformulier/favicon-32x32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="Boorinvulformulier/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;700&family=Rubik+Mono+One&display=swap" rel="stylesheet">
